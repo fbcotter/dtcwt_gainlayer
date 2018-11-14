@@ -1,0 +1,9 @@
+torch
+torchvision
+py3nvml
+numpy
+tensorboardX
+PyWavelets
+GitPython
+pygit
+
