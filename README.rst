@@ -1,3 +1,6 @@
+.. image:: https://zenodo.org/badge/157608716.svg
+   :target: https://zenodo.org/badge/latestdoi/157608716
+
 GainLayer Experiments
 =====================
 This repo implements the network described in the paper `Deep Learning in the
@@ -12,7 +15,17 @@ attenuate/enhance frequency regions of the 2-D Fourier plane:
 
 .. image:: images/freqplane.png
 
-__ https://arxiv.org
+__ https://arxiv.org/abs/1811.06115
+
+Installation
+------------
+This repo uses my pytorch implementation of the dtcwt: `pytorch_wavelets`__. You
+can install this however just by pip installing the requirements.txt.
+
+__ https://github.com/fbcotter/pytorch_wavelets
+
+You can pip install this directory as well, but you do not need to to run
+experiments.
 
 Running
 -------
