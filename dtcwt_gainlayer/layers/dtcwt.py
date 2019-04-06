@@ -120,9 +120,10 @@ class WaveConvLayer(nn.Module):
         F: number of output channels
         lp_size: Spatial size of lowpass filter
         bp_sizes: Spatial size of bandpass filters
+        q: the proportion of actiavtions to keep
     """
-    def __init__(self, C, F, lp_size, bp_sizes, stride=1, biort='near_sym_a',
-                 qshift='qshift_a'):
+    def __init__(self, C, F, lp_size, bp_sizes, q=1.0,
+                 biort='near_sym_a', qshift='qshift_a'):
         super().__init__()
         self.C = C
         self.F = F
@@ -132,14 +133,121 @@ class WaveConvLayer(nn.Module):
         if self.bp_sizes[0] == 0:
             skip_hps = True
         self.J = len(bp_sizes)
+
         self.XFM = DTCWTForward(
             biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps)
+        if q < 1.0:
+            self.shrink = SparsifyWaveCoeffs_std(self.J, C, q, 0.9)
+        else:
+            self.shrink = lambda x: x
+        self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
         self.IFM = DTCWTInverse(
             biort=biort, qshift=qshift, J=self.J)
-        self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
-        self.stride = stride
 
     def forward(self, X):
         yl, yh = self.XFM(X)
-        yl2, yh2 = self.GainLayer((yl, yh))
-        return self.IFM((yl2, yh2))[...,::self.stride, ::self.stride]
+        yl, yh = self.shrink((yl, yh))
+        yl, yh = self.GainLayer((yl, yh))
+        return self.IFM((yl, yh))
+
+
+class SparsifyWaveCoeffs_std(nn.Module):
+    r""" Sparsifies complex wavelet coefficients by shrinking their magnitude
+
+    Given a quantile value, shrinks the wavelet coefficients so that (1-q) are
+    non zero. E.g. if q = 0.9, only 10 percent of coefficients will remain.
+
+    Uses the rayleigh distribution to estimate what the threshold should be.
+
+    Args:
+        J (int): number of scales
+        C (int): number of channels
+        q (float): quantile value.
+        alpha (float): exponential moving average value. must be between 0 and 1
+    """
+    def __init__(self, J, C, q=0.5, alpha=.9, soft=True):
+        super().__init__()
+        assert alpha >= 0 and alpha <= 1
+        # Examine initial thresholds
+        self.J = J
+        self.C = C
+        self.alpha = alpha
+        # Keep track of the old value for the ema
+        self.ema = nn.Parameter(torch.zeros((J, C, 6)), requires_grad=False)
+        self.k = np.sqrt(-2 * np.log(1-q+1e-6))
+        #  self.k = k
+        self.soft = soft
+
+    @property
+    def threshs(self):
+        return self.k * self.ema
+
+    def constrain(self):
+        pass
+
+    def forward(self, x):
+        r""" Sparsify wavelet coefficients coming from DTCWTForward
+
+        Args:
+            x (tuple): tuple of yl, yh, where yh is a list/tuple of length J
+            representing the coefficients for scale1, scale2, ... scaleJ
+
+        Returns:
+            y (tuple): tuple of yl, yh, where yh is the shrunk wavelet
+            coefficients
+        """
+        yl, yh = x
+        assert len(yh) == self.J
+        yh2 = []
+
+        # For each scale, calculate max(r-t, 0)/r, as the 'gain' to be applied
+        # to each input.
+        for j in range(self.J):
+            if yh[j].shape == torch.Size([0]):
+                yh2.append(yh[j])
+            else:
+                r2 = torch.sum(yh[j]**2, dim=-1, keepdim=True)
+                r = torch.sqrt(r2)
+
+                # Calculate the std of each channel
+                sz = r.shape[0] * r.shape[3] * r.shape[4]
+                # If the real and imaginary parts both have variance 1,
+                # then the mean should be situated around sqrt(pi/2) = 1.25
+                mu = 1/sz * torch.sum(r.data, dim=(0,3,4,5))
+                m2 = 1/sz * torch.sum(r2.data, dim=(0,3,4,5))
+                # Similarly, the std should be sqrt((4-pi)/2) = .65
+                std = torch.sqrt(m2-mu**2)
+
+                # Update the estimate
+                # self.ema[j] = self.alpha * std + (1-self.alpha)*self.ema[j]
+                self.ema[j] = self.alpha * self.ema[j] + (1-self.alpha) * std
+
+                # Calculate the new threshold
+                thresh = self.ema[j] * self.k
+
+                # Review the threshold to match the size of yh:
+                # (N, C, 6, H, W, 2)
+                t = thresh.view(self.C, 6, 1, 1, 1)
+
+                if self.soft:
+                    yh2.append(_mag_shrink(yh[j], r, t))
+                else:
+                    yh2.append(_mag_shrink_hard(yh[j], r, t))
+
+        return yl, yh2
+
+
+def _mag_shrink_hard(x, r, t):
+    gain = (r >= t).float()
+
+    return x * gain
+
+
+def _mag_shrink(x, r, t):
+    # Calculate the numerator
+    r_new = func.relu(r - t)
+
+    # Add 1 to the denominator if the numerator will be 0
+    r1 = r + (r.data <= t).float()
+
+    return x * r_new/r1
