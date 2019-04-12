@@ -39,7 +39,7 @@ class WaveGainLayer(nn.Module):
         lp_size: Spatial size of lowpass filter
         bp_sizes: Spatial size of bandpass filters
     """
-    def __init__(self, C, F, lp_size=1, bp_sizes=(3,1), lp_stride=1,
+    def __init__(self, C, F, lp_size=3, bp_sizes=(1,1), lp_stride=1,
                  bp_strides=(1,1)):
         super().__init__()
         self.C = C
@@ -105,6 +105,10 @@ class WaveGainLayer(nn.Module):
 
         return yl2, yh2
 
+    def extra_repr(self):
+        return '(lp): Parameter of type {} with size: {}'.format(
+            self.lp.type(), 'x'.join([str(x) for x in self.lp.shape]))
+
 
 class WaveConvLayer(nn.Module):
     """ Decomposes a signal into a DTCWT pyramid and learns weights for each
@@ -122,7 +126,7 @@ class WaveConvLayer(nn.Module):
         bp_sizes: Spatial size of bandpass filters
         q: the proportion of actiavtions to keep
     """
-    def __init__(self, C, F, lp_size, bp_sizes, q=1.0,
+    def __init__(self, C, F, lp_size=3, bp_sizes=(1,), q=1.0,
                  biort='near_sym_a', qshift='qshift_a'):
         super().__init__()
         self.C = C
@@ -136,8 +140,10 @@ class WaveConvLayer(nn.Module):
 
         self.XFM = DTCWTForward(
             biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps)
-        if q < 1.0:
+        if 0.0 < q < 1.0:
             self.shrink = SparsifyWaveCoeffs_std(self.J, C, q, 0.9)
+        elif q <= 0.0:
+            self.shrink = ReLUWaveCoeffs()
         else:
             self.shrink = lambda x: x
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
@@ -146,9 +152,22 @@ class WaveConvLayer(nn.Module):
 
     def forward(self, X):
         yl, yh = self.XFM(X)
-        yl, yh = self.shrink((yl, yh))
         yl, yh = self.GainLayer((yl, yh))
+        yl, yh = self.shrink((yl, yh))
         return self.IFM((yl, yh))
+
+
+class ReLUWaveCoeffs(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        """ Bandpass input comes in as a tensor of shape (N, C, 6, H, W, 2).
+        Need to do the relu independently on real and imaginary parts """
+        yl, yh = x
+        yl = func.relu(yl)
+        yh = [func.relu(b) for b in yh]
+        return yl, yh
 
 
 class SparsifyWaveCoeffs_std(nn.Module):
