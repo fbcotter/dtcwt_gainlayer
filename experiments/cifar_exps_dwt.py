@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import time
-from dtcwt_gainlayer.layers.dtcwt import WaveConvLayer
+from dtcwt_gainlayer.layers.dwt import WaveConvLayer
 import torch.nn.functional as func
 import numpy as np
 import random
@@ -114,45 +114,45 @@ class MyModule(nn.Module):
 # 1 or 2 invariant layers at different depths.
 C = 96
 nets = {
-    'gainA': [('gain', (1, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+    'gainA': [('gain', (3, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
               ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainB': [('conv', 3, 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
+    'gainB': [('conv', 3, 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
               ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainC': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-              ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
+              ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainD': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
+              ('conv', 3, C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainE': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
               ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-              ('gain', (1, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+              ('gain', (3, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainF': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
               ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('gain', (1, (1,)), 4*C, 4*C)],
-    'gainAB': [('gain', (1, (1,)), 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
+              ('conv', 3, 2*C, 4*C), ('gain', (3, (1,)), 4*C, 4*C)],
+    'gainAB': [('gain', (3, (1,)), 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
                ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
                ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainBC': [('conv', 3, 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
+    'gainBC': [('conv', 3, 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
+               ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
                ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainCD': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
+               ('gain', (3, (1,)), C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
                ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainDE': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('gain', (1, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainAC': [('gain', (1, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
+               ('conv', 3, C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
+               ('gain', (3, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+    'gainAC': [('gain', (3, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+               ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
                ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainBD': [('conv', 3, 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
+    'gainBD': [('conv', 3, 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
+               ('conv', 3, C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
                ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
     'gainCE': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-               ('gain', (1, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+               ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+               ('gain', (3, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
 }
 
 allnets = {
@@ -189,7 +189,7 @@ class MixedNet(MyModule):
                 name = 'gain' + chr(ord('A') + layer)
                 # Add a triple of layers for each invariant layer
                 blk = nn.Sequential(
-                    WaveConvLayer(C1, C2, k[0], k[1], q=q),
+                    WaveConvLayer(C1, C2, k[0], k[1], q=q, wave='db2'),
                     nn.BatchNorm2d(C2),
                     nn.ReLU())
                 layer += 1
@@ -345,6 +345,7 @@ if __name__ == "__main__":
         elapsed_time = 0
         best_acc = 0
         for epoch in range(trn.final_epoch):
+            print("\n| Training Epoch #{}".format(epoch))
             print('| Learning rate: {}'.format(
                 trn.optimizer.param_groups[0]['lr']))
             print('| Momentum : {}'.format(
@@ -407,6 +408,7 @@ if __name__ == "__main__":
         else:
             type_ = list(nets.keys()) + ['ref',]
 
+        m, b = linear_func(0.1, 0.9, 0.7, 0.75)
         tune.run_experiments(
             {
                 exp_name: {
@@ -434,7 +436,7 @@ if __name__ == "__main__":
                         #  "wd": tune.sample_from(lambda spec: np.random.uniform(
                            #  1e-5, 5e-4
                         #  ))
-                        "lr": tune.grid_search([0.4]),
+                        "lr": tune.grid_search([0.45]),
                         "mom": tune.grid_search([0.8]),
                         "q": tune.grid_search([1]),
                         #  "wd": tune.grid_search([1e-5, 1e-1e-4]),

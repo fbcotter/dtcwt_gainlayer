@@ -123,7 +123,10 @@ class WaveConvLayer(nn.Module):
         self.J = len(bp_sizes)
 
         self.XFM = DWTForward(J=self.J, mode=mode, wave=wave)
-        self.shrink = lambda x: x
+        if q < 0:
+            self.shrink = ReLUWaveCoeffs()
+        else:
+            self.shrink = lambda x: x
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
         self.IFM = DWTInverse(mode=mode, wave=wave)
 
@@ -136,3 +139,15 @@ class WaveConvLayer(nn.Module):
     def init(self, gain=1, method='xavier_uniform'):
         self.GainLayer.init(gain, method)
 
+
+class ReLUWaveCoeffs(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        """ Bandpass input comes in as a tensor of shape (N, C, 3, H, W).
+        Need to do the relu independently on real and imaginary parts """
+        yl, yh = x
+        yl = func.relu(yl)
+        yh = [func.relu(b) for b in yh]
+        return yl, yh

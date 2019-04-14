@@ -50,7 +50,7 @@ class BaseClass(Trainable):
         - std (optional): the initialization variance
     """
     def _setup(self, config):
-        raise NotImplementedError("Please overwrite the _setup metho")
+        raise NotImplementedError("Please overwrite the _setup method")
 
     @property
     def verbose(self):
@@ -69,15 +69,27 @@ class BaseClass(Trainable):
         else:
             return self._last_epoch
 
+    @property
+    def final_epoch(self):
+        if hasattr(self, '_final_epoch'):
+            return self._final_epoch
+        else:
+            return 120
+
     def step_lr(self):
         if hasattr(self, 'scheduler'):
             self.scheduler.step()
 
     def _train_iteration(self):
         self.model.train()
-        top1_correct = 0
-        top5_correct = 0
-        total = 0
+        top1_update = 0
+        top1_epoch = 0
+        top5_update = 0
+        top5_epoch = 0
+        loss_update = 0
+        loss_epoch = 0
+        update = 0
+        epoch = 0
         num_iter = len(self.train_loader)
         start = time.time()
         update_steps = np.linspace(
@@ -92,36 +104,47 @@ class BaseClass(Trainable):
             # Get the regularization loss directly from the network
             loss.backward()
             self.optimizer.step()
+            corrects, bs = num_correct(output.data, target, topk=(1,5))
+            top1_epoch += corrects[0].item()
+            top5_epoch += corrects[1].item()
+            loss_epoch += loss.item()*bs
+            epoch += bs
 
             # Plotting/Reporting
             if self.verbose:
-                corrects, bs = num_correct(output.data, target, topk=(1,5))
-                total += bs
-                top1_correct += corrects[0]
-                top5_correct += corrects[1]
+                update += bs
+                top1_update += corrects[0].item()
+                top5_update += corrects[1].item()
+                loss_update += loss.item()*bs
 
                 sys.stdout.write('\r')
                 sys.stdout.write(
                     '| Epoch [{:3d}/{:3d}] Iter[{:3d}/{:3d}]\t\tLoss: {:.4f}\t'
                     'Acc@1: {:.3f}%\tAcc@5: {:.3f}%\tElapsed Time: '
                     '{:.1f}min'.format(
-                        self.last_epoch, 120, batch_idx+1, num_iter,
-                        loss.item(), 100. * top1_correct.item()/total,
-                        100. * top5_correct.item()/total,
-                        (time.time()-start)/60))
+                        self.last_epoch, self.final_epoch, batch_idx+1,
+                        num_iter, loss_update/update, 100. * top1_update/update,
+                        100. * top5_update/update, (time.time()-start)/60))
                 sys.stdout.flush()
+                # Every update_steps, print a new line
                 if batch_idx in update_steps:
-                    top1_correct = 0
-                    top5_correct = 0
-                    total = 0
+                    top1_update = 0
+                    top5_update = 0
+                    loss_update = 0
+                    update = 0
                     print()
+        loss_epoch /= epoch
+        top1_epoch = 100. * top1_epoch/epoch
+        top5_epoch = 100. * top5_epoch/epoch
+        return {"mean_loss": loss_epoch, "mean_accuracy": top1_epoch, "acc5":
+                top5_epoch}
 
     def _test(self):
         self.model.eval()
         test_loss = 0
         top1_correct = 0
         top5_correct = 0
-        total = 0
+        epoch = 0
         with torch.no_grad():
             for data, target in self.test_loader:
                 if self.use_cuda:
@@ -133,20 +156,19 @@ class BaseClass(Trainable):
                 # get the index of the max log-probability
                 corrects, bs = num_correct(output.data, target, topk=(1, 5))
                 test_loss += loss.item()
-                total += bs
-                top1_correct += corrects[0]
-                top5_correct += corrects[1]
+                top1_correct += corrects[0].item()
+                top5_correct += corrects[1].item()
+                epoch += bs
 
-        test_loss /= total
-        acc1 = 100. * top1_correct.item()/total
-        acc5 = 100. * top5_correct.item()/total
+        test_loss /= epoch
+        acc1 = 100. * top1_correct/epoch
+        acc5 = 100. * top5_correct/epoch
         if self.verbose:
             # Save checkpoint when best model
-            sys.stdout.write('\r')
-            print("\n| Validation Epoch #{}\t\t\tLoss: {:.4f}\tAcc@1: {:.2f}%\t"
-                  "Acc@5: {:.2f}%".format(self.last_epoch, test_loss,
-                                          acc1, acc5))
-        return {"mean_loss": test_loss, "mean_accuracy": acc1}
+            print("|\n| Validation Epoch #{}\t\t\tLoss: {:.4f}\tAcc@1: {:.2f}%"
+                  "\tAcc@5: {:.2f}%".format(
+                      self.last_epoch, test_loss, acc1, acc5))
+        return {"mean_loss": test_loss, "mean_accuracy": acc1, "acc5": acc5}
 
     def _train(self):
         if not hasattr(self, '_last_epoch'):
@@ -157,8 +179,8 @@ class BaseClass(Trainable):
         self._train_iteration()
         return self._test()
 
-    def _save(self, checkpoint_dir):
-        checkpoint_path = os.path.join(checkpoint_dir, "model.pth")
+    def _save(self, checkpoint_dir, name='model.pth'):
+        checkpoint_path = os.path.join(checkpoint_dir, name)
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
