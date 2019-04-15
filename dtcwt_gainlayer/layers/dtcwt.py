@@ -1,33 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
+import torch.nn.init as init
 import numpy as np
 from pytorch_wavelets import DTCWTForward, DTCWTInverse
-
-
-def init_dtcwt_coeffs(C, F, lp_size, bp_sizes):
-    """ Initializes the lowpass and bandpass filters for a dtcwt
-    wavelet pyramid"""
-    if not (isinstance(F, tuple) or isinstance(F, list)):
-        F = [F,] * (len(bp_sizes) + 1)
-
-    bp = [None,]*len(bp_sizes)
-    for j, (s, f) in enumerate(zip(bp_sizes, F[:-1])):
-        if s != 0:
-            # std = 1/s
-            std = 2/np.sqrt(s*s*C)
-            bp[j] = torch.tensor(std) * torch.randn(f, C, 6, s, s, 2,
-                                                    requires_grad=True)
-
-    s = lp_size
-    if s == 0:
-        lp = None
-    else:
-        # std = 1/s
-        std = 2/np.sqrt(s*s*C)
-        lp = torch.tensor(std) * torch.randn(F[-1], C, s, s, requires_grad=True)
-
-    return lp, bp
 
 
 class WaveGainLayer(nn.Module):
@@ -47,67 +23,83 @@ class WaveGainLayer(nn.Module):
         self.lp_size = lp_size
         self.bp_sizes = bp_sizes
         self.J = len(bp_sizes)
-        self.lp, self.bp = init_dtcwt_coeffs(
-            C, F, lp_size, bp_sizes)
-        self.lp = nn.Parameter(self.lp)
-        self.bp = nn.ParameterList([nn.Parameter(bp) for bp in self.bp])
-        self.lp_scales = [1, 2, 4, 8]
-        self.bp_scales = [2, 4, 8, 16]
-        #  self.bp_scales = [1, 4, 8, 16]
-        self.lp_stride = lp_stride
-        self.bp_strides = bp_strides
-
-        # Calculate the pad widths
-        if lp_size is not None:
-            self.lp_pad = lp_size // 2
-        else:
+        # Create the lowpass gain
+        if lp_size is None or lp_size == 0:
             self.lp_pad = None
-        self.bp_pad = []
-        for s in bp_sizes:
-            if s is not None:
-                self.bp_pad.append(s // 2)
-            else:
-                self.bp_pad.append(None)
+            self.g_lp = nn.Parameter(torch.tensor([]), requires_grad=False)
+        else:
+            self.lp_pad = (lp_size - 1) // 2
+            self.g_lp = nn.Parameter(torch.randn(F, C, lp_size, lp_size))
 
-    def forward(self, x):
-        yl, yh = x
-        assert len(yh) == len(self.bp), "Number of bandpasses must " + \
+        # Create the bandpass gains
+        self.bp_pad = []
+        bps = []
+        for s in bp_sizes:
+            if s is None or s == 0:
+                self.bp_pad.append(None)
+                bps.append(nn.Parameter(torch.tensor([]), requires_grad=False))
+            else:
+                self.bp_pad.append((s - 1) // 2)
+                bps.append(nn.Parameter(torch.randn(6, 2, F, C, s, s)))
+        self.g = nn.ParameterList(bps)
+        self.init()
+
+    def forward(self, coeffs):
+        # Pull out the lowpass and the bandpass coefficients
+        u_lp, u = coeffs
+        assert len(u) == len(self.g), "Number of bandpasses must " + \
             "match number of filters"
 
-        if self.lp is not None:
-            s = self.lp_stride
-            yl2 = self.lp_scales[self.J-1] * func.conv2d(
-                yl, self.lp, padding=self.lp_pad, stride=s)
+        if self.g_lp is None or self.g_lp.shape == torch.Size([0]):
+            v_lp = torch.zeros_like(u_lp)
         else:
-            yl2 = torch.zeros_like(yl)
+            v_lp = func.conv2d(u_lp, self.g_lp, padding=self.lp_pad)
 
-        yh2 = []
-        for bp, level, pad, scale, s in zip(
-                self.bp, yh, self.bp_pad, self.bp_scales[:self.J],
-                self.bp_strides):
-            if bp is not None and not bp.shape == torch.Size([0]):
-                angles = []
-                for l in range(6):
-                    in_r, in_i = level[:,:,l,:,:,0], level[:,:,l,:,:,1]
-                    w_r, w_i = bp[:,:,l,:,:,0], bp[:,:,l,:,:,1]
-
-                    # real output = r*r - i*i
-                    out_r = func.conv2d(in_r, w_r, padding=pad, stride=s) - \
-                        func.conv2d(in_i, w_i, padding=pad, stride=s)
-                    # imag output = r*i + i*r
-                    out_i = func.conv2d(in_r, w_i, padding=pad, stride=s) + \
-                        func.conv2d(in_i, w_r, padding=pad, stride=s)
-
-                    angles.append(torch.stack((out_r, out_i), dim=-1))
-                yh2.append(scale * torch.stack(angles, dim=2))
+        v = []
+        for j in range(self.J):
+            g_j = self.g[j]
+            u_j = u[j]
+            pad = self.bp_pad[j]
+            if g_j is None or g_j.shape == torch.Size([0]):
+                v.append(torch.zeros_like(u_j))
             else:
-                yh2.append(torch.zeros_like(level))
+                # Do the mixing for each orientation independently
+                bands = []
+                for l in range(6):
+                    u_jl_real, u_jl_imag = u_j[:,:,l,:,:,0], u_j[:,:,l,:,:,1]
+                    g_jl_real, g_jl_imag = g_j[l, 0], g_j[l, 1]
+                    # real output = r*r - i*i
+                    v_jl_real = (func.conv2d(u_jl_real, g_jl_real, padding=pad)
+                               - func.conv2d(u_jl_imag, g_jl_imag, padding=pad))
+                    # imag output = r*i + i*r
+                    v_jl_imag = (func.conv2d(u_jl_real, g_jl_imag, padding=pad)
+                               + func.conv2d(u_jl_imag, g_jl_real, padding=pad))
+                    bands.append(torch.stack((v_jl_real, v_jl_imag), dim=-1))
+                # Stack up the 6 bands along the third dimension again
+                v.append(torch.stack(bands, dim=2))
 
-        return yl2, yh2
+        return v_lp, v
+
+    def init(self, gain=1, method='xavier_uniform'):
+        lp_scales = np.array([1, 2, 4, 8]) * gain
+        bp_scales = np.array([2, 4, 8, 16]) * gain
+        # Choose the initialization scheme
+        if method == 'xavier_uniform':
+            fn = init.xavier_uniform_
+        else:
+            fn = init.xavier_normal_
+
+        if not (self.g_lp is None or self.g_lp.shape == torch.Size([0])):
+            fn(self.g_lp, gain=lp_scales[self.J-1])
+
+        for j in range(self.J):
+            g_j = self.g[j]
+            if not (g_j is None or g_j.shape == torch.Size([0])):
+                fn(g_j, gain=bp_scales[j])
 
     def extra_repr(self):
-        return '(lp): Parameter of type {} with size: {}'.format(
-            self.lp.type(), 'x'.join([str(x) for x in self.lp.shape]))
+        return '(g_lp): Parameter of type {} with size: {}'.format(
+            self.g_lp.type(), 'x'.join([str(x) for x in self.g_lp.shape]))
 
 
 class WaveConvLayer(nn.Module):
@@ -131,15 +123,14 @@ class WaveConvLayer(nn.Module):
         super().__init__()
         self.C = C
         self.F = F
-        self.lp_size = lp_size
-        self.bp_sizes = bp_sizes
-        skip_hps = False
-        if self.bp_sizes[0] == 0:
-            skip_hps = True
+        # If any of the mixing for a scale is 0, don't calculate the dtcwt at
+        # that scale
+        skip_hps = [True if s == 0 else False for s in bp_sizes]
         self.J = len(bp_sizes)
 
         self.XFM = DTCWTForward(
             biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps)
+        # The nonlinearity
         if 0.0 < q < 1.0:
             self.shrink = SparsifyWaveCoeffs_std(self.J, C, q, 0.9)
         elif q <= 0.0:
@@ -150,11 +141,12 @@ class WaveConvLayer(nn.Module):
         self.IFM = DTCWTInverse(
             biort=biort, qshift=qshift, J=self.J)
 
-    def forward(self, X):
-        yl, yh = self.XFM(X)
-        yl, yh = self.GainLayer((yl, yh))
-        yl, yh = self.shrink((yl, yh))
-        return self.IFM((yl, yh))
+    def forward(self, x):
+        u_lp, u = self.XFM(x)
+        v_lp, v = self.GainLayer((u_lp, u))
+        u_lp2, u2 = self.shrink((v_lp, v))
+        y = self.IFM((u_lp2, u2))
+        return y
 
 
 class ReLUWaveCoeffs(nn.Module):

@@ -35,7 +35,7 @@ class WaveGainLayer(nn.Module):
             self.lp_pad = (lp_size - 1) // 2
             self.g_lp = nn.Parameter(torch.randn(F, C, lp_size, lp_size))
 
-        # Create the banpass gains
+        # Create the bandpass gains
         self.bp_pad = []
         bps = []
         for s in bp_sizes:
@@ -60,19 +60,19 @@ class WaveGainLayer(nn.Module):
             v_lp = func.conv2d(u_lp, self.g_lp, padding=self.lp_pad)
 
         v = []
-        for i in range(self.J):
-            g_i = self.g[i]
-            u_i = u[i]
-            pad = self.bp_pad[i]
-            if g_i is None or g_i.shape == torch.Size([0]):
-                v.append(torch.zeros_like(u_i))
+        for j in range(self.J):
+            g_j = self.g[j]
+            u_j = u[j]
+            pad = self.bp_pad[j]
+            if g_j is None or g_j.shape == torch.Size([0]):
+                v.append(torch.zeros_like(u_j))
             else:
-                v_i1 = func.conv2d(u_i[:,:,0], g_i[0], padding=pad)
-                v_i2 = func.conv2d(u_i[:,:,1], g_i[1], padding=pad)
-                v_i3 = func.conv2d(u_i[:,:,2], g_i[2], padding=pad)
+                v_j1 = func.conv2d(u_j[:,:,0], g_j[0], padding=pad)
+                v_j2 = func.conv2d(u_j[:,:,1], g_j[1], padding=pad)
+                v_j3 = func.conv2d(u_j[:,:,2], g_j[2], padding=pad)
                 # Stack up the bands along the third dimension to match the
                 # input style
-                v.append(torch.stack((v_i1, v_i2, v_i3), dim=2))
+                v.append(torch.stack((v_j1, v_j2, v_j3), dim=2))
 
         return v_lp, v
 
@@ -89,9 +89,9 @@ class WaveGainLayer(nn.Module):
             fn(self.g_lp, gain=lp_scales[self.J-1])
 
         for j in range(self.J):
-            g_i = self.g[j]
-            if not (g_i is None or g_i.shape == torch.Size([0])):
-                fn(g_i, gain=bp_scales[j])
+            g_j = self.g[j]
+            if not (g_j is None or g_j.shape == torch.Size([0])):
+                fn(g_j, gain=bp_scales[j])
 
     def extra_repr(self):
         return '(g_lp): Parameter of type {} with size: {}'.format(
@@ -130,11 +130,12 @@ class WaveConvLayer(nn.Module):
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
         self.IFM = DWTInverse(mode=mode, wave=wave)
 
-    def forward(self, X):
-        yl, yh = self.XFM(X)
-        yl, yh = self.GainLayer((yl, yh))
-        yl, yh = self.shrink((yl, yh))
-        return self.IFM((yl, yh))
+    def forward(self, x):
+        u_lp, u = self.XFM(x)
+        v_lp, v = self.GainLayer((u_lp, u))
+        u_lp2, u2 = self.shrink((v_lp, v))
+        y = self.IFM((u_lp2, u2))
+        return y
 
     def init(self, gain=1, method='xavier_uniform'):
         self.GainLayer.init(gain, method)

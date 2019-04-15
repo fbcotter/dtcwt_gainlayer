@@ -43,6 +43,7 @@ parser.add_argument('--exist-ok', action='store_true',
                     help='If true, is ok if output directory already exists')
 parser.add_argument('--epochs', default=120, type=int, help='num epochs')
 parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
+parser.add_argument('--num-gpus', type=int, default=1)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build. If left blank, will run 14
@@ -218,7 +219,7 @@ class MixedNet(MyModule):
                 ('convH', blk3)]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
-            self.fc1 = nn.Linear(512, self.num_classes)
+            self.fc1 = nn.Linear(2*C2, self.num_classes)
 
 
 class TrainNET(BaseClass):
@@ -263,7 +264,7 @@ class TrainNET(BaseClass):
                 seed=args.seed, **kwargs)
         elif args.dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
-                64, args.data_dir, val_only=args.testOnly,
+                64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, distributed=False, **kwargs)
 
@@ -287,23 +288,28 @@ class TrainNET(BaseClass):
         # Build the network
         self.model = MixedNet(args.dataset, type_, q)
         self.model.init(1.0)
+        if torch.cuda.device_count() > 1 and config.get('num_gpus', 0) > 1:
+            self.model = nn.DataParallel(self.model)
+            model = self.model.module
+        else:
+            model = self.model
         if self.use_cuda:
             self.model.cuda()
 
         # ######################################################################
-        # Build the optimizer - use separate parameter groups for the invariant
+        # Build the optimizer - use separate parameter groups for the gain
         # and convolutional layers
-        default_params = {'params': list(self.model.fc1.parameters()),
+        default_params = {'params': list(model.fc1.parameters()),
                           'lr': lr, 'mom': mom, 'wd': wd}
-        inv_params = {'params': [], 'lr': lr, 'mom': mom, 'wd': wd}
-        for name, module in self.model.net.named_children():
-            if name.startswith('inv'):
-                inv_params['params'] += list(module.parameters())
+        gain_params = {'params': [], 'lr': lr, 'mom': mom, 'wd': wd}
+        for name, module in model.net.named_children():
+            if name.startswith('gain'):
+                gain_params['params'] += list(module.parameters())
             else:
                 default_params['params'] += list(module.parameters())
 
         self.optimizer, self.scheduler = optim.get_optim(
-            'sgd', [default_params, inv_params], init_lr=0.1,
+            'sgd', [default_params, gain_params], init_lr=0.1,
             steps=args.steps, wd=1e-4, gamma=args.gamma, momentum=0.9,
             max_epochs=args.epochs)
 
@@ -337,7 +343,7 @@ if __name__ == "__main__":
             type_ = 'ref2'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_}
+        cfg = {'args': args, 'type': type_, 'num_gpus': args.num_gpus}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
 
@@ -345,6 +351,7 @@ if __name__ == "__main__":
         elapsed_time = 0
         best_acc = 0
         for epoch in range(trn.final_epoch):
+            print("\n| Training Epoch #{}".format(epoch))
             print('| Learning rate: {}'.format(
                 trn.optimizer.param_groups[0]['lr']))
             print('| Momentum : {}'.format(
@@ -407,16 +414,20 @@ if __name__ == "__main__":
         else:
             type_ = list(nets.keys()) + ['ref',]
 
+        if args.dataset.startswith('cifar'):
+            gpus = 0.5
+        else:
+            gpus = 1
         tune.run_experiments(
             {
                 exp_name: {
                     "stop": {
                         #  "mean_accuracy": 0.95,
-                        "training_iteration": 1 if args.smoke_test else 120,
+                        "training_iteration": 1 if args.smoke_test else args.epochs,
                     },
                     "resources_per_trial": {
                         "cpu": 1,
-                        "gpu": 0 if args.cpu else 0.5
+                        "gpu": 0 if args.cpu else gpus
                     },
                     "run": TrainNET,
                     #  "num_samples": 1 if args.smoke_test else 40,
@@ -434,7 +445,7 @@ if __name__ == "__main__":
                         #  "wd": tune.sample_from(lambda spec: np.random.uniform(
                            #  1e-5, 5e-4
                         #  ))
-                        "lr": tune.grid_search([0.4]),
+                        "lr": tune.grid_search([0.45]),
                         "mom": tune.grid_search([0.8]),
                         "q": tune.grid_search([1]),
                         #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
