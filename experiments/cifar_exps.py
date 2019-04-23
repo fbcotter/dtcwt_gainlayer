@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.init as init
 import time
 from dtcwt_gainlayer.layers.dtcwt import WaveConvLayer
+from dtcwt_gainlayer.layers.dwt import WaveConvLayer as WaveConvLayer_dwt
 import torch.nn.functional as func
 import numpy as np
 import random
@@ -23,6 +24,8 @@ from tensorboardX import SummaryWriter
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Example')
 parser.add_argument('outdir', type=str, help='experiment directory')
+parser.add_argument('-C', type=int, default=96, help='number channels')
+parser.add_argument('--dwt', action='store_true', help='use the dwt')
 parser.add_argument('--seed', type=int, default=None, metavar='S',
                     help='random seed (default: None)')
 parser.add_argument('--batch-size', type=int, default=128)
@@ -104,96 +107,75 @@ class MyModule(nn.Module):
         return func.log_softmax(out, dim=-1)
 
 
-# Define the options of networks. The 4 parameters are:
-# (layer type, kernel size, input channels, output channels)
-#
-# For convolutional layers, the kernel size is a single integer.
-# For the gain layers, the kernel size is a tuple of integers. The first is
-# k_lp, and the second is a list of k_bp for all the scales in the gain layer.
-#
-# The dictionary 'nets' has 14 different layouts of vgg nets networks with 0,
-# 1 or 2 invariant layers at different depths.
-C = 96
+# Define the options of networks.
 nets = {
-    'gainA': [('gain', (1, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainB': [('conv', 3, 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainC': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-              ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainD': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainE': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-              ('gain', (1, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainF': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('gain', (1, (1,)), 4*C, 4*C)],
-    'gainAB': [('gain', (1, (1,)), 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainBC': [('conv', 3, 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainCD': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainDE': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('gain', (1, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainAC': [('gain', (1, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainBD': [('conv', 3, 3, C), ('gain', (1, (1,)), C, C), ('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('gain', (1, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainCE': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (1, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-               ('gain', (1, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-}
-
-allnets = {
-    'ref': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-            ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-            ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    **nets
+    'ref': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'gainA': ['gain', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'gainB': ['conv', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'gainC': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
+    'gainD': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
+    'gainE': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'gain', 'conv'],
+    'gainF': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'gain'],
+    'gainAB': ['gain', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'gainBC': ['conv', 'gain', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
+    'gainCD': ['conv', 'conv', 'pool', 'gain', 'gain', 'pool', 'conv', 'conv'],
+    'gainDE': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'gain', 'conv'],
+    'gainAC': ['gain', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
+    'gainBD': ['conv', 'gain', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
+    'gainCE': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'gain', 'conv'],
 }
 
 
-class MixedNet(MyModule):
-    """ MixedNet allows custom definition of conv/inv layers as you would
+class NetBuilder(MyModule):
+    """ NetBuilder allows custom definition of conv/inv layers as you would
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type, q=1.):
+    def __init__(self, dataset, type, use_dwt=False, num_channels=96):
         super().__init__(dataset)
-        layers = allnets[type]
+        layers = nets[type]
         blks = []
+        # A letter counter for the layer number
         layer = 0
-        for blk, k, C1, C2 in layers:
+        # The number of input (C1) and output (C2) channels. The channels double
+        # after a pooling layer
+        C1 = 3
+        C2 = num_channels
+        # A number for the pooling layer
+        pool = 1
+
+        # Call the DWT or the DTCWT conv layer
+        if use_dwt:
+            WaveLayer = lambda x, y: WaveConvLayer_dwt(x, y, 3, (1,))
+        else:
+            WaveLayer = lambda x, y: WaveConvLayer(x, y, 1, (1,))
+
+        for blk in layers:
             if blk == 'conv':
                 name = 'conv' + chr(ord('A') + layer)
                 # Add a triple of layers for each convolutional layer
                 blk = nn.Sequential(
-                    nn.Conv2d(C1, C2, k, padding=(k-1)//2, stride=1),
+                    nn.Conv2d(C1, C2, 3, padding=1, stride=1),
                     nn.BatchNorm2d(C2),
                     nn.ReLU())
+                # The next layer's input channels becomes this layer's output
+                # channels
+                C1 = C2
+                # Increase the layer counter
                 layer += 1
-            elif blk == 'pool':
-                name = 'pool' + str(C1)
-                blk = nn.MaxPool2d(2)
             elif blk == 'gain':
                 name = 'gain' + chr(ord('A') + layer)
-                # Add a triple of layers for each invariant layer
                 blk = nn.Sequential(
-                    WaveConvLayer(C1, C2, k[0], k[1], q=q),
+                    WaveLayer(C1, C2),
                     nn.BatchNorm2d(C2),
                     nn.ReLU())
+                C1 = C2
                 layer += 1
+            elif blk == 'pool':
+                name = 'pool' + str(pool)
+                blk = nn.MaxPool2d(2)
+                pool += 1
+                C2 = 2*C1
             # Add the name and block to the list
             blks.append((name, blk))
 
@@ -243,7 +225,10 @@ class TrainNET(BaseClass):
     def _setup(self, config):
         args = config.pop("args")
         vars(args).update(config)
-        type_ = config.get('type')
+        type_ = config.get('type', 'gainA')
+        use_dwt = config.get('dwt', args.dwt)
+        C = config.get('C', args.C)
+        dataset = config.get('dataset', args.dataset)
         if hasattr(args, 'verbose'):
             self._verbose = args.verbose
 
@@ -257,12 +242,12 @@ class TrainNET(BaseClass):
         # ######################################################################
         #  Data
         kwargs = {'num_workers': 0, 'pin_memory': True} if self.use_cuda else {}
-        if args.dataset.startswith('cifar'):
+        if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
-                32, args.datadir, dataset=args.dataset,
+                32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 seed=args.seed, **kwargs)
-        elif args.dataset == 'tiny_imagenet':
+        elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
@@ -284,11 +269,14 @@ class TrainNET(BaseClass):
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         q = config.get('q', q)
+        std = config.get('std', 1.0)
 
         # Build the network
-        self.model = MixedNet(args.dataset, type_, q)
-        self.model.init(1.0)
-        if torch.cuda.device_count() > 1 and config.get('num_gpus', 0) > 1:
+        self.model = NetBuilder(dataset, type_, use_dwt, C)
+        self.model.init(std)
+
+        # Split across GPUs
+        if torch.cuda.device_count() > 1 and args.num_gpus > 1:
             self.model = nn.DataParallel(self.model)
             model = self.model.module
         else:
@@ -343,7 +331,7 @@ if __name__ == "__main__":
             type_ = 'ref2'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_, 'num_gpus': args.num_gpus}
+        cfg = {'args': args, 'type': type_}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
 
@@ -419,33 +407,22 @@ if __name__ == "__main__":
                 exp_name: {
                     "stop": {
                         #  "mean_accuracy": 0.95,
-                        "training_iteration": 1 if args.smoke_test else args.epochs,
+                        "training_iteration": (1 if args.smoke_test
+                                               else args.epochs),
                     },
                     "resources_per_trial": {
                         "cpu": 1,
                         "gpu": 0 if args.cpu else args.num_gpus
                     },
                     "run": TrainNET,
-                    #  "num_samples": 1 if args.smoke_test else 40,
                     "num_samples": 10 if args.nsamples == 0 else args.nsamples,
                     "checkpoint_at_end": True,
                     "config": {
                         "args": args,
+                        "dataset": args.dataset,
                         "type": tune.grid_search(type_),
-                        #  "lr": tune.sample_from(lambda spec: np.random.uniform(
-                            #  0.1, 0.7
-                        #  )),
-                        #  "mom": tune.sample_from(
-                            #  lambda spec: m*spec.config.lr + b +
-                                #  0.05*np.random.randn()),
-                        #  "wd": tune.sample_from(lambda spec: np.random.uniform(
-                           #  1e-5, 5e-4
-                        #  ))
-                        "lr": tune.grid_search([0.45]),
-                        "mom": tune.grid_search([0.8]),
-                        "q": tune.grid_search([1]),
-                        #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
-                        "std": tune.grid_search([1.])
+                        "dwt": args.dwt,
+                        "C": args.C,
                     }
                 }
             },
