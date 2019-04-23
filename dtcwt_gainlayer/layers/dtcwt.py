@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
-import torch.nn.init as init
+import math
 import numpy as np
 from pytorch_wavelets import DTCWTForward, DTCWTInverse
 
@@ -14,6 +14,17 @@ class WaveGainLayer(nn.Module):
         F: number of output channels
         lp_size: Spatial size of lowpass filter
         bp_sizes: Spatial size of bandpass filters
+
+
+    The forward pass should be provided with a tuple of wavelet coefficients.
+    The tuple should have length 2 and be the lowpass and bandpass coefficients.
+    The lowpass coefficients should have shape (N, C, H, W).
+    The bandpass coefficients should also be a tuple/list and have length J.
+    Each entry in the bandpass list should have 6 dimensions, and should be of
+    shape (N, C, 6, H', W', 2).
+
+    Returns a tuple of tensors of the same form as the input, but with F output
+    channels.
     """
     def __init__(self, C, F, lp_size=3, bp_sizes=(1,1), lp_stride=1,
                  bp_strides=(1,1)):
@@ -51,7 +62,8 @@ class WaveGainLayer(nn.Module):
             "match number of filters"
 
         if self.g_lp is None or self.g_lp.shape == torch.Size([0]):
-            v_lp = torch.zeros_like(u_lp)
+            s = u_lp.shape
+            v_lp = torch.zeros((s[0], self.F, s[2], s[3]), device=u_lp.device)
         else:
             v_lp = func.conv2d(u_lp, self.g_lp, padding=self.lp_pad)
 
@@ -61,7 +73,9 @@ class WaveGainLayer(nn.Module):
             u_j = u[j]
             pad = self.bp_pad[j]
             if g_j is None or g_j.shape == torch.Size([0]):
-                v.append(torch.zeros_like(u_j))
+                s = u_j.shape
+                v.append(torch.zeros((s[0], self.F, s[2], s[3], s[4], s[5]),
+                                     device=u_j.device))
             else:
                 # Do the mixing for each orientation independently
                 bands = []
@@ -82,20 +96,27 @@ class WaveGainLayer(nn.Module):
 
     def init(self, gain=1, method='xavier_uniform'):
         lp_scales = np.array([1, 2, 4, 8]) * gain
-        bp_scales = np.array([2, 4, 8, 16]) * gain
-        # Choose the initialization scheme
-        if method == 'xavier_uniform':
-            fn = init.xavier_uniform_
-        else:
-            fn = init.xavier_normal_
+        bp_scales = np.array([1, 2, 4, 8]) * gain
 
+        # Calculate the fan in and fan out manually - the gain are in odd shapes
+        # so won't work with the default functions
         if not (self.g_lp is None or self.g_lp.shape == torch.Size([0])):
-            fn(self.g_lp, gain=lp_scales[self.J-1])
+            s = self.g_lp.shape
+            fan_in, fan_out = s[1]*s[2]*s[3], s[0]*s[2]*s[3]
+            std = lp_scales[self.J-1] * math.sqrt(2.0 / (fan_in + fan_out))
+            a = math.sqrt(3.0) * std
+            with torch.no_grad():
+                self.g_lp.uniform_(-a, a)
 
         for j in range(self.J):
             g_j = self.g[j]
             if not (g_j is None or g_j.shape == torch.Size([0])):
-                fn(g_j, gain=bp_scales[j])
+                s = g_j.shape
+                fan_in, fan_out = s[3]*s[4]*s[5], s[2]*s[4]*s[5]
+                std = bp_scales[j] * math.sqrt(2.0 / (fan_in + fan_out))
+                a = math.sqrt(3.0) * std
+                with torch.no_grad():
+                    g_j.uniform_(-a, a)
 
     def extra_repr(self):
         return '(g_lp): Parameter of type {} with size: {}'.format(
@@ -147,6 +168,9 @@ class WaveConvLayer(nn.Module):
         u_lp2, u2 = self.shrink((v_lp, v))
         y = self.IFM((u_lp2, u2))
         return y
+
+    def init(self, gain=1, method='xavier_uniform'):
+        self.GainLayer.init(gain, method)
 
 
 class ReLUWaveCoeffs(nn.Module):

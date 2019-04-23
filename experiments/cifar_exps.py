@@ -43,7 +43,7 @@ parser.add_argument('--exist-ok', action='store_true',
                     help='If true, is ok if output directory already exists')
 parser.add_argument('--epochs', default=120, type=int, help='num epochs')
 parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
-parser.add_argument('--num-gpus', type=int, default=1)
+parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build. If left blank, will run 14
@@ -88,7 +88,7 @@ class MyModule(nn.Module):
         """ Define the default initialization scheme """
         self.apply(net_init)
         # Try do any custom layer initializations
-        for child in self.net.children():
+        for child in self.net.modules():
             try:
                 child.init(std)
             except AttributeError:
@@ -414,10 +414,6 @@ if __name__ == "__main__":
         else:
             type_ = list(nets.keys()) + ['ref',]
 
-        if args.dataset.startswith('cifar'):
-            gpus = 0.5
-        else:
-            gpus = 1
         tune.run_experiments(
             {
                 exp_name: {
@@ -427,7 +423,7 @@ if __name__ == "__main__":
                     },
                     "resources_per_trial": {
                         "cpu": 1,
-                        "gpu": 0 if args.cpu else gpus
+                        "gpu": 0 if args.cpu else args.num_gpus
                     },
                     "run": TrainNET,
                     #  "num_samples": 1 if args.smoke_test else 40,
@@ -449,7 +445,7 @@ if __name__ == "__main__":
                         "mom": tune.grid_search([0.8]),
                         "q": tune.grid_search([1]),
                         #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
-                        #  "std": tune.grid_search([0.5, 1., 1.5, 2.0])
+                        "std": tune.grid_search([1.])
                     }
                 }
             },
