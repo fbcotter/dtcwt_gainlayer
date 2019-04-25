@@ -24,7 +24,7 @@ from tensorboardX import SummaryWriter
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Example')
 parser.add_argument('outdir', type=str, help='experiment directory')
-parser.add_argument('-C', type=int, default=96, help='number channels')
+parser.add_argument('-C', type=int, default=32, help='number channels')
 parser.add_argument('--dwt', action='store_true', help='use the dwt')
 parser.add_argument('--seed', type=int, default=None, metavar='S',
                     help='random seed (default: None)')
@@ -108,21 +108,20 @@ class MyModule(nn.Module):
 
 
 # Define the options of networks.
+# 'gain' = xfm + gain + inv + nonlinear
+# 'gain1' = xfm + gain + nonlinear
+# 'gain2' = gain + nonlinear
+# 'gain3' = gain + nonlinear + inv
+# 'gain4' = gain + inv + nonlinear
 nets = {
     'ref': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    'gainA': ['gain', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    'gainB': ['conv', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    'gainC': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    'gainD': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
-    'gainE': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'gain', 'conv'],
-    'gainF': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'gain'],
-    'gainAB': ['gain', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    'gainBC': ['conv', 'gain', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    'gainCD': ['conv', 'conv', 'pool', 'gain', 'gain', 'pool', 'conv', 'conv'],
-    'gainDE': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'gain', 'conv'],
-    'gainAC': ['gain', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    'gainBD': ['conv', 'gain', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
-    'gainCE': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'gain', 'conv'],
+    'type1': ['gain', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'type2': ['conv', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'type3': ['gain1', 'gain3', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'type4': ['gain1', 'gain4', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
+    'type5': ['gain1', 'gain2', 'gain3', 'pool', 'conv', 'pool', 'conv', 'conv'],
+    'type6': ['gain1', 'gain2', 'gain4', 'pool', 'conv', 'pool', 'conv', 'conv'],
+    'type7': ['gain1', 'gain3', 'pool', 'gain1', 'gain3', 'pool', 'conv', 'conv'],
 }
 
 
@@ -131,12 +130,12 @@ class NetBuilder(MyModule):
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type, use_dwt=False, num_channels=96):
+    def __init__(self, dataset, type, q=-1, use_dwt=False, num_channels=96):
         super().__init__(dataset)
         layers = nets[type]
         blks = []
         # A letter counter for the layer number
-        layer = 0
+        layer_num = 0
         # The number of input (C1) and output (C2) channels. The channels double
         # after a pooling layer
         C1 = 3
@@ -146,32 +145,46 @@ class NetBuilder(MyModule):
 
         # Call the DWT or the DTCWT conv layer
         if use_dwt:
-            WaveLayer = lambda x, y: WaveConvLayer_dwt(x, y, 3, (1,))
+            WaveLayer = lambda x, y, q, xfm, ifm: WaveConvLayer_dwt(
+                x, y, 3, (1,), q=q, xfm=xfm, ifm=ifm)
         else:
-            WaveLayer = lambda x, y: WaveConvLayer(x, y, 1, (1,))
+            WaveLayer = lambda x, y, q, xfm, ifm: WaveConvLayer(
+                x, y, 1, (1,), q=q, xfm=xfm, ifm=ifm)
 
-        for blk in layers:
-            if blk == 'conv':
-                name = 'conv' + chr(ord('A') + layer)
-                # Add a triple of layers for each convolutional layer
-                blk = nn.Sequential(
-                    nn.Conv2d(C1, C2, 3, padding=1, stride=1),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
+        for layer in layers:
+            if layer == 'conv' or layer.startswith('gain'):
+                if layer == 'conv':
+                    # Add a triple of layers for each convolutional layer
+                    blk = nn.Sequential(
+                        nn.Conv2d(C1, C2, 3, padding=1, stride=1),
+                        nn.BatchNorm2d(C2),
+                        nn.ReLU())
+                elif layer == 'gain':
+                    blk = nn.Sequential(
+                        WaveLayer(C1, C2, 1.0, True, True),
+                        nn.ReLU())
+                elif layer == 'gain1':
+                    blk = nn.Sequential(
+                        WaveLayer(C1, C2, q, True, False))
+                elif layer == 'gain2':
+                    blk = nn.Sequential(
+                        WaveLayer(C1, C2, q, False, False))
+                elif layer == 'gain3':
+                    blk = nn.Sequential(
+                        WaveLayer(C1, C2, q, False, True))
+                elif layer == 'gain4':
+                    blk = nn.Sequential(
+                        WaveLayer(C1, C2, 1.0, False, True),
+                        nn.ReLU())
+                else:
+                    raise ValueError
+                name = layer + chr(ord('A') + layer_num)
                 # The next layer's input channels becomes this layer's output
                 # channels
                 C1 = C2
                 # Increase the layer counter
-                layer += 1
-            elif blk == 'gain':
-                name = 'gain' + chr(ord('A') + layer)
-                blk = nn.Sequential(
-                    WaveLayer(C1, C2),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
-                C1 = C2
-                layer += 1
-            elif blk == 'pool':
+                layer_num += 1
+            elif layer == 'pool':
                 name = 'pool' + str(pool)
                 blk = nn.MaxPool2d(2)
                 pool += 1
@@ -272,7 +285,8 @@ class TrainNET(BaseClass):
         std = config.get('std', 1.0)
 
         # Build the network
-        self.model = NetBuilder(dataset, type_, use_dwt, C)
+        self.model = NetBuilder(
+            dataset=dataset, type=type_, q=q, use_dwt=use_dwt, num_channels=C)
         self.model.init(std)
 
         # Split across GPUs
@@ -421,6 +435,9 @@ if __name__ == "__main__":
                         "args": args,
                         "dataset": args.dataset,
                         "type": tune.grid_search(type_),
+                        "lr": tune.grid_search([0.4, 0.6]),
+                        "mom": tune.grid_search([0.7, 0.8, 0.9]),
+                        "q": tune.grid_search([-1]),
                         "dwt": args.dwt,
                         "C": args.C,
                     }
