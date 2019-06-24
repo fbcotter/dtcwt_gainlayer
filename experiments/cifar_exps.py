@@ -7,7 +7,6 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import time
 from dtcwt_gainlayer.layers.dtcwt import WaveConvLayer
 import torch.nn.functional as func
@@ -16,8 +15,7 @@ import random
 from collections import OrderedDict
 from dtcwt_gainlayer.data import cifar, tiny_imagenet
 from dtcwt_gainlayer import optim
-from math import sqrt
-from tune_trainer import BaseClass, get_hms
+from tune_trainer import BaseClass, get_hms, net_init
 from tensorboardX import SummaryWriter
 
 # Training settings
@@ -43,7 +41,7 @@ parser.add_argument('--exist-ok', action='store_true',
                     help='If true, is ok if output directory already exists')
 parser.add_argument('--epochs', default=120, type=int, help='num epochs')
 parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
-parser.add_argument('--num-gpus', type=int, default=1)
+parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
                     help='''Model type(s) to build. If left blank, will run 14
@@ -56,52 +54,6 @@ Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
-
-
-def net_init(m):
-    classname = m.__class__.__name__
-    if (classname.find('Conv') == 0) or (classname.find('Linear') == 0):
-        init.xavier_uniform_(m.weight, gain=sqrt(2))
-        try:
-            init.constant_(m.bias, 0)
-        # Can get an attribute error if no bias to learn
-        except AttributeError:
-            pass
-
-
-class MyModule(nn.Module):
-    """ This is a wrapper for our networks that has some useful functions"""
-    def __init__(self, dataset):
-        super().__init__()
-        # Define the number of scales and classes dependent on the dataset
-        if dataset == 'cifar10':
-            self.num_classes = 10
-            self.S = 3
-        elif dataset == 'cifar100':
-            self.num_classes = 100
-            self.S = 3
-        elif dataset == 'tiny_imagenet':
-            self.num_classes = 200
-            self.S = 4
-
-    def init(self, std=1):
-        """ Define the default initialization scheme """
-        self.apply(net_init)
-        # Try do any custom layer initializations
-        for child in self.net.children():
-            try:
-                child.init(std)
-            except AttributeError:
-                pass
-
-    def forward(self, x):
-        """ Define the default forward pass"""
-        out = self.net(x)
-        out = self.avg(out)
-        out = out.view(out.size(0), -1)
-        out = self.fc1(out)
-
-        return func.log_softmax(out, dim=-1)
 
 
 # Define the options of networks. The 4 parameters are:
@@ -164,13 +116,25 @@ allnets = {
 }
 
 
-class MixedNet(MyModule):
+class MixedNet(nn.Module):
     """ MixedNet allows custom definition of conv/inv layers as you would
     a normal network. You can change the ordering below to suit your
     task
     """
     def __init__(self, dataset, type, q=1.):
         super().__init__(dataset)
+
+        # Define the number of scales and classes dependent on the dataset
+        if dataset == 'cifar10':
+            self.num_classes = 10
+            self.S = 3
+        elif dataset == 'cifar100':
+            self.num_classes = 100
+            self.S = 3
+        elif dataset == 'tiny_imagenet':
+            self.num_classes = 200
+            self.S = 4
+
         layers = allnets[type]
         blks = []
         layer = 0
@@ -221,6 +185,15 @@ class MixedNet(MyModule):
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
 
+    def forward(self, x):
+        """ Define the default forward pass"""
+        out = self.net(x)
+        out = self.avg(out)
+        out = out.view(out.size(0), -1)
+        out = self.fc1(out)
+
+        return func.log_softmax(out, dim=-1)
+
 
 class TrainNET(BaseClass):
     """ This class handles model training and scheduling for our mnist networks.
@@ -256,7 +229,7 @@ class TrainNET(BaseClass):
 
         # ######################################################################
         #  Data
-        kwargs = {'num_workers': 0, 'pin_memory': True} if self.use_cuda else {}
+        kwargs = {'num_workers': 4, 'pin_memory': True} if self.use_cuda else {}
         if args.dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=args.dataset,
@@ -284,10 +257,14 @@ class TrainNET(BaseClass):
         mom = config.get('mom', mom)
         wd = config.get('wd', wd)
         q = config.get('q', q)
+        std = config.get('std', 1.0)
 
         # Build the network
         self.model = MixedNet(args.dataset, type_, q)
-        self.model.init(1.0)
+        init = lambda x: net_init(x, std)
+        self.model.apply(init)
+
+        # Split across GPUs
         if torch.cuda.device_count() > 1 and config.get('num_gpus', 0) > 1:
             self.model = nn.DataParallel(self.model)
             model = self.model.module
@@ -299,19 +276,31 @@ class TrainNET(BaseClass):
         # ######################################################################
         # Build the optimizer - use separate parameter groups for the gain
         # and convolutional layers
-        default_params = {'params': list(model.fc1.parameters()),
-                          'lr': lr, 'mom': mom, 'wd': wd}
-        gain_params = {'params': [], 'lr': lr, 'mom': mom, 'wd': wd}
+        default_params = list(model.fc1.parameters())
+        gain_params = []
         for name, module in model.net.named_children():
+            params = [p for p in module.parameters() if p.requires_grad]
             if name.startswith('gain'):
-                gain_params['params'] += list(module.parameters())
+                gain_params += params
             else:
-                default_params['params'] += list(module.parameters())
+                default_params += params
 
         self.optimizer, self.scheduler = optim.get_optim(
-            'sgd', [default_params, gain_params], init_lr=0.1,
-            steps=args.steps, wd=1e-4, gamma=args.gamma, momentum=0.9,
+            'sgd', default_params, init_lr=lr,
+            steps=args.steps, wd=wd, gamma=0.2, momentum=mom,
             max_epochs=args.epochs)
+
+        if len(gain_params) > 0:
+            # Get special optimizer parameters
+            lr1 = config.get('lr1', lr)
+            gamma1 = config.get('gamma1', 0.2)
+            mom1 = config.get('mom1', mom)
+            wd1 = config.get('wd1', wd)
+
+            self.optimizer1, self.scheduler1 = optim.get_optim(
+                'sgd', gain_params, init_lr=lr1,
+                steps=args.steps, wd=wd1, gamma=gamma1, momentum=mom1,
+                max_epochs=args.epochs)
 
         if self.verbose:
             print(self.model)
@@ -337,6 +326,7 @@ if __name__ == "__main__":
             os.mkdir(outdir)
         # Copy this source file to the output directory for record keeping
         copyfile(__file__, os.path.join(outdir, 'search.py'))
+        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
 
         # Choose the model to run and build it
         if args.type is None:
@@ -350,15 +340,14 @@ if __name__ == "__main__":
         # Train for set number of epochs
         elapsed_time = 0
         best_acc = 0
-        for epoch in range(trn.final_epoch):
+        trn.step_lr()
+        for epoch in range(trn.last_epoch, trn.final_epoch):
             print("\n| Training Epoch #{}".format(epoch))
             print('| Learning rate: {}'.format(
                 trn.optimizer.param_groups[0]['lr']))
             print('| Momentum : {}'.format(
                 trn.optimizer.param_groups[0]['momentum']))
             start_time = time.time()
-            # Update the scheduler
-            trn.step_lr()
 
             # Train for one iteration and update
             trn_results = trn._train_iteration()
@@ -382,6 +371,8 @@ if __name__ == "__main__":
             elapsed_time += epoch_time
             print('| Elapsed time : %d:%02d:%02d\t Epoch time: %.1fs' % (
                   get_hms(elapsed_time) + (epoch_time,)))
+            # Update the scheduler
+            trn.step_lr()
 
     # We are using a scheduler
     else:
@@ -414,10 +405,6 @@ if __name__ == "__main__":
         else:
             type_ = list(nets.keys()) + ['ref',]
 
-        if args.dataset.startswith('cifar'):
-            gpus = 0.5
-        else:
-            gpus = 1
         tune.run_experiments(
             {
                 exp_name: {
@@ -427,7 +414,7 @@ if __name__ == "__main__":
                     },
                     "resources_per_trial": {
                         "cpu": 1,
-                        "gpu": 0 if args.cpu else gpus
+                        "gpu": 0 if args.cpu else args.num_gpus
                     },
                     "run": TrainNET,
                     #  "num_samples": 1 if args.smoke_test else 40,
@@ -449,7 +436,7 @@ if __name__ == "__main__":
                         "mom": tune.grid_search([0.8]),
                         "q": tune.grid_search([1]),
                         #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
-                        #  "std": tune.grid_search([0.5, 1., 1.5, 2.0])
+                        "std": tune.grid_search([1.])
                     }
                 }
             },

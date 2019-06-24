@@ -1,3 +1,9 @@
+"""
+This module creates a Ray Tune training class. In particular, it makes
+scaffolding for running single epochs of training, testing, saving and loading
+models. The Trainable class is then used in the experiment code with the
+schedulers, but it can also be used without the scheduler.
+"""
 from ray.tune import Trainable
 import time
 import torch.nn.functional as func
@@ -5,6 +11,22 @@ import numpy as np
 import torch
 import sys
 import os
+from math import sqrt
+
+import torch.nn.init as init
+
+
+def net_init(m, gain=1):
+    classname = m.__class__.__name__
+    if (classname.find('Conv') == 0) or (classname.find('Linear') == 0):
+        init.xavier_uniform_(m.weight, gain=sqrt(2))
+        try:
+            init.constant_(m.bias, 0)
+        # Can get an attribute error if no bias to learn
+        except AttributeError:
+            pass
+    elif hasattr(m, 'init'):
+        m.init(gain)
 
 
 def get_hms(seconds):
@@ -64,10 +86,7 @@ class BaseClass(Trainable):
 
     @property
     def last_epoch(self):
-        if hasattr(self, 'scheduler'):
-            return self.scheduler.last_epoch
-        else:
-            return self._last_epoch
+        return self.scheduler.last_epoch
 
     @property
     def final_epoch(self):
@@ -77,8 +96,19 @@ class BaseClass(Trainable):
             return 120
 
     def step_lr(self):
-        if hasattr(self, 'scheduler'):
-            self.scheduler.step()
+        self.scheduler.step()
+        if hasattr(self, 'scheduler1'):
+            self.scheduler1.step()
+
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+        if hasattr(self, 'optimizer1'):
+            self.optimizer1.zero_grad()
+
+    def opt_step(self):
+        self.optimizer.step()
+        if hasattr(self, 'optimizer1'):
+            self.optimizer1.step()
 
     def _train_iteration(self):
         self.model.train()
@@ -98,12 +128,13 @@ class BaseClass(Trainable):
         for batch_idx, (data, target) in enumerate(self.train_loader):
             if self.use_cuda:
                 data, target = data.cuda(), target.cuda()
-            self.optimizer.zero_grad()
+            self.zero_grad()
+
             output = self.model(data)
             loss = func.nll_loss(output, target)
-            # Get the regularization loss directly from the network
             loss.backward()
-            self.optimizer.step()
+            self.opt_step()
+
             corrects, bs = num_correct(output.data, target, topk=(1,5))
             top1_epoch += corrects[0].item()
             top5_epoch += corrects[1].item()
@@ -181,13 +212,45 @@ class BaseClass(Trainable):
 
     def _save(self, checkpoint_dir, name='model.pth'):
         checkpoint_path = os.path.join(checkpoint_dir, name)
+        model = self.model.state_dict()
+        opt = self.optimizer.state_dict()
+        sch = self.scheduler.state_dict()
+        opt1 = None
+        sch1 = None
+        if hasattr(self, 'optimizer1'):
+            opt1 = self.optimizer1.state_dict()
+        if hasattr(self, 'scheduler1'):
+            sch1 = self.scheduler1.state_dict()
         torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict()
+            'model_state_dict': model,
+            'optimizer_state_dict': opt,
+            'scheduler_state_dict': sch,
+            'optimizer1_state_dict': opt1,
+            'scheduler1_state_dict': sch1,
         }, checkpoint_path)
+
         return checkpoint_path
 
     def _restore(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        chk = torch.load(checkpoint_path)
+        self.model.load_state_dict(chk['model_state_dict'])
+        self.optimizer.load_state_dict(chk['optimizer_state_dict'])
+
+        if 'scheduler_state_dict' in chk.keys():
+            self.scheduler.load_state_dict(chk['scheduler_state_dict'])
+
+        if 'optimizer1_state_dict' in chk.keys() and \
+                chk['optimizer1_state_dict'] is not None:
+            if not hasattr(self, 'optimizer1'):
+                raise ValueError('Loading from a checkpoint with a second '
+                                 'optimizer, but we dont have one')
+            else:
+                self.optimizer1.load_state_dict(chk['optimizer1_state_dict'])
+
+        if 'scheduler1_state_dict' in chk.keys() and \
+                chk['scheduler1_state_dict'] is not None:
+            if not hasattr(self, 'scheduler1'):
+                raise ValueError('Loading from a checkpoint with a second '
+                                 'scheduler, but we dont have one')
+            else:
+                self.scheduler1.load_state_dict(chk['scheduler1_state_dict'])
