@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import torch.nn.functional as func
 import numpy as np
+import math
 from pytorch_wavelets import DWTForward, DWTInverse
 
 
@@ -18,6 +18,16 @@ class WaveGainLayer(nn.Module):
     Can specify None for any of the sizes, in which case, the convolution is not
     done, and zeros are passed through. This may be particularly useful say if
     you wanted to only apply gains to the second scale and not to the first.
+
+    The forward pass should be provided with a tuple of wavelet coefficients.
+    The tuple should have length 2 and be the lowpass and bandpass coefficients.
+    The lowpass coefficients should have shape (N, C, H, W).
+    The bandpass coefficients should also be a tuple/list and have length J.
+    Each entry in the bandpass list should have 6 dimensions, and should be of
+    shape (N, C, 3, H', W').
+
+    Returns a tuple of tensors of the same form as the input, but with F output
+    channels.
     """
     def __init__(self, C, F, lp_size=1, bp_sizes=(1,)):
         super().__init__()
@@ -55,7 +65,8 @@ class WaveGainLayer(nn.Module):
             "match number of filters"
 
         if self.g_lp is None or self.g_lp.shape == torch.Size([0]):
-            v_lp = torch.zeros_like(u_lp)
+            s = u_lp.shape
+            v_lp = torch.zeros((s[0], self.F, s[2], s[3]), device=u_lp.device)
         else:
             v_lp = func.conv2d(u_lp, self.g_lp, padding=self.lp_pad)
 
@@ -65,7 +76,9 @@ class WaveGainLayer(nn.Module):
             u_j = u[j]
             pad = self.bp_pad[j]
             if g_j is None or g_j.shape == torch.Size([0]):
-                v.append(torch.zeros_like(u_j))
+                s = u_j.shape
+                v.append(torch.zeros((s[0], self.F, s[2], s[3], s[4]),
+                                     device=u_j.device))
             else:
                 v_j1 = func.conv2d(u_j[:,:,0], g_j[0], padding=pad)
                 v_j2 = func.conv2d(u_j[:,:,1], g_j[1], padding=pad)
@@ -78,20 +91,27 @@ class WaveGainLayer(nn.Module):
 
     def init(self, gain=1, method='xavier_uniform'):
         lp_scales = np.array([1, 2, 4, 8]) * gain
-        bp_scales = np.array([2, 4, 8, 16]) * gain
-        # Choose the initialization scheme
-        if method == 'xavier_uniform':
-            fn = init.xavier_uniform_
-        else:
-            fn = init.xavier_normal_
+        bp_scales = np.array([1, 2, 4, 8]) * gain
 
+        # Calculate the fan in and fan out manually - the gain are in odd shapes
+        # so won't work with the default functions
         if not (self.g_lp is None or self.g_lp.shape == torch.Size([0])):
-            fn(self.g_lp, gain=lp_scales[self.J-1])
+            s = self.g_lp.shape
+            fan_in, fan_out = s[1]*s[2]*s[3], s[0]*s[2]*s[3]
+            std = lp_scales[self.J-1] * math.sqrt(2.0 / (fan_in + fan_out))
+            a = math.sqrt(3.0) * std
+            with torch.no_grad():
+                self.g_lp.uniform_(-a, a)
 
         for j in range(self.J):
             g_j = self.g[j]
             if not (g_j is None or g_j.shape == torch.Size([0])):
-                fn(g_j, gain=bp_scales[j])
+                s = g_j.shape
+                fan_in, fan_out = s[2]*s[3]*s[4], s[1]*s[3]*s[4]
+                std = bp_scales[j] * math.sqrt(2.0 / (fan_in + fan_out))
+                a = math.sqrt(3.0) * std
+                with torch.no_grad():
+                    g_j.uniform_(-a, a)
 
     def extra_repr(self):
         return '(g_lp): Parameter of type {} with size: {}'.format(
