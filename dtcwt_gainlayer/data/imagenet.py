@@ -19,9 +19,9 @@ def subsample(data_dir, sz):
                            os.path.join(dest, c, files[i]))
 
 
-def get_data(in_size, data_dir, val_only=False, batch_size=128,
-             trainsize=-1, perturb=True, num_workers=0, iter_size=1,
-             distributed=False, pin_memory=False):
+def get_data(data_dir, val_only=False, batch_size=128, trainsize=-1,
+             perturb=True, num_workers=0, iter_size=1, distributed=False,
+             pin_memory=False):
     """ Provides a pytorch loader to load in imagenet
     Args:
         in_size (int): the input size - can be used to scale the spatial size
@@ -30,37 +30,37 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
         batch_size (int): batch size for train loader. the val loader batch
             size is always 100
         class_sz (int): size of the training set. can be used to subsample it
-        seed (int): random seed for the loaders
         perturb (bool): whether to do data augmentation on the training set
         num_workers (int): how many workers to load data
         iter_size (int):
     """
-    valdir = os.path.join(data_dir, 'val2')
+    # Data loading code
+    traindir = os.path.join(data_dir, 'train')
+    valdir = os.path.join(data_dir, 'val')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
     if not os.path.exists(valdir):
         raise ValueError(
-            'Could not find the val2 folder in the Tiny Imagenet directory.'
-            'Have you run the prep_tinyimagenet.py script in '
-            'scatnet_learn.data?')
+            'Could not find the val folder in the Imagenet directory.')
 
-    # Get the test loader
     transform_test = transforms.Compose([
-        transforms.CenterCrop(in_size),
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
         transforms.ToTensor(),
         normalize
     ])
+    # Get the test loader
     testloader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transform_test),
-        batch_size=batch_size, shuffle=False,
+        batch_size=batch_size//iter_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory)
 
     if val_only:
         trainloader = None
     else:
-        if 0 < trainsize < 100000:
-            class_sz = trainsize // 200
+        if 0 < trainsize < 1300000:
+            class_sz = trainsize // 1000
             traindir = os.path.join(data_dir, 'train{}'.format(class_sz))
         else:
             traindir = os.path.join(data_dir, 'train')
@@ -70,20 +70,20 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
         # Get the train loader
         if perturb:
             transform_train = transforms.Compose([
-                transforms.RandomCrop(in_size, padding=8),
+                transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 normalize,
             ])
         else:
             transform_train = transforms.Compose([
-                transforms.CenterCrop(in_size),
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 normalize
             ])
 
-        trainset = datasets.ImageFolder(
-            traindir, transform_train)
+        trainset = datasets.ImageFolder(traindir, transform_train)
 
         if distributed:
             trainsampler = torch.utils.data.distributed.DistributedSampler(
@@ -94,7 +94,9 @@ def get_data(in_size, data_dir, val_only=False, batch_size=128,
         trainloader = torch.utils.data.DataLoader(
             trainset, batch_size=batch_size // iter_size,
             shuffle=(trainsampler is None), num_workers=num_workers,
-            pin_memory=pin_memory, sampler=trainsampler)
+            pin_memory=pin_memory, sampler=trainsampler,
+            )
 
-    sys.stdout.write("| loaded tiny imagenet")
+    sys.stdout.write("| loaded imagenet")
     return trainloader, testloader
+

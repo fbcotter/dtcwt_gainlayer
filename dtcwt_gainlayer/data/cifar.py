@@ -6,7 +6,6 @@ from torchvision import transforms
 import numpy as np
 import torch
 import os
-import random
 
 mean = {
     'cifar10': (0.4914, 0.4822, 0.4465),
@@ -33,9 +32,8 @@ def subsample(cifar10=True, size=50000):
         return np.sort(idx[:, :class_sz].ravel())
 
 
-def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
-             trainsize=-1, seed=random.randint(0, 10000), perturb=True,
-             double_size=False, pin_memory=True, num_workers=0):
+def get_data(in_size, data_dir, dataset='cifar10', batch_size=128, trainsize=-1,
+             perturb=True, double_size=False, pin_memory=True, num_workers=0):
     """ Provides a pytorch loader to load in cifar10/100
     Args:
         in_size (int): the input size - can be used to scale the spatial size
@@ -44,7 +42,6 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
         batch_size (int): batch size for train loader. the val loader batch
             size is always 100
         trainsize (int): size of the training set. can be used to subsample it
-        seed (int): random seed for the loaders
         perturb (bool): whether to do data augmentation on the training set
         double_size (bool): whether to double the input size
     """
@@ -98,18 +95,11 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128,
             root=data_dir, train=False, download=False,
             transform=transform_test)
 
-    # Set the loader initializer seeds for reproducibility
-    def worker_init_fn(id):
-        import random
-        import numpy as np
-        random.seed(seed+id)
-        np.random.seed(seed+id)
-
     trainloader = torch.utils.data.DataLoader(
         trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        worker_init_fn=worker_init_fn, pin_memory=pin_memory)
+        pin_memory=pin_memory)
     testloader = torch.utils.data.DataLoader(
         testset, batch_size=100, shuffle=False, num_workers=num_workers,
-        worker_init_fn=worker_init_fn, pin_memory=pin_memory)
+        pin_memory=pin_memory)
 
     return trainloader, testloader
