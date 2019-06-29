@@ -62,7 +62,8 @@ class WaveGainLayer(nn.Module):
             "match number of filters"
 
         if self.g_lp is None or self.g_lp.shape == torch.Size([0]):
-            v_lp = torch.zeros_like(u_lp)
+            s = u_lp.shape
+            v_lp = torch.zeros((s[0], self.F, s[2], s[3]), device=u_lp.device)
         else:
             v_lp = func.conv2d(u_lp, self.g_lp, padding=self.lp_pad)
 
@@ -72,7 +73,9 @@ class WaveGainLayer(nn.Module):
             u_j = u[j]
             pad = self.bp_pad[j]
             if g_j is None or g_j.shape == torch.Size([0]):
-                v.append(torch.zeros_like(u_j))
+                s = u_j.shape
+                v.append(torch.zeros((s[0], self.F, s[2], s[3], s[4], s[5]),
+                                     device=u_j.device))
             else:
                 # Do the mixing for each orientation independently
                 bands = []
@@ -81,10 +84,10 @@ class WaveGainLayer(nn.Module):
                     g_jl_real, g_jl_imag = g_j[l, 0], g_j[l, 1]
                     # real output = r*r - i*i
                     v_jl_real = (func.conv2d(u_jl_real, g_jl_real, padding=pad)
-                               - func.conv2d(u_jl_imag, g_jl_imag, padding=pad))
+                               - func.conv2d(u_jl_imag, g_jl_imag, padding=pad)) # noqa
                     # imag output = r*i + i*r
                     v_jl_imag = (func.conv2d(u_jl_real, g_jl_imag, padding=pad)
-                               + func.conv2d(u_jl_imag, g_jl_real, padding=pad))
+                               + func.conv2d(u_jl_imag, g_jl_real, padding=pad)) # noqa
                     bands.append(torch.stack((v_jl_real, v_jl_imag), dim=-1))
                 # Stack up the 6 bands along the third dimension again
                 v.append(torch.stack(bands, dim=2))
@@ -136,9 +139,12 @@ class WaveConvLayer(nn.Module):
         lp_size: Spatial size of lowpass filter
         bp_sizes: Spatial size of bandpass filters
         q: the proportion of actiavtions to keep
+        xfm: true indicating should take dtcwt of input, false to skip
+        ifm: true indicating should take inverse dtcwt of output, false to skip
     """
     def __init__(self, C, F, lp_size=3, bp_sizes=(1,), q=1.0,
-                 biort='near_sym_a', qshift='qshift_a'):
+                 biort='near_sym_a', qshift='qshift_a',
+                 xfm=True, ifm=True):
         super().__init__()
         self.C = C
         self.F = F
@@ -147,8 +153,13 @@ class WaveConvLayer(nn.Module):
         skip_hps = [True if s == 0 else False for s in bp_sizes]
         self.J = len(bp_sizes)
 
-        self.XFM = DTCWTForward(
-            biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps)
+        # The forward transform
+        if xfm:
+            self.XFM = DTCWTForward(
+                biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps)
+        else:
+            self.XFM = lambda x: x
+
         # The nonlinearity
         if 0.0 < q < 1.0:
             self.shrink = SparsifyWaveCoeffs_std(self.J, F, q, 0.9)
@@ -156,8 +167,15 @@ class WaveConvLayer(nn.Module):
             self.shrink = ReLUWaveCoeffs()
         else:
             self.shrink = lambda x: x
+
+        # The mixing
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
-        self.IFM = DTCWTInverse(biort=biort, qshift=qshift)
+
+        # The inverse
+        if ifm:
+            self.IFM = DTCWTInverse(biort=biort, qshift=qshift, J=self.J)
+        else:
+            self.IFM = lambda x: x
 
     def forward(self, x):
         u_lp, u = self.XFM(x)
