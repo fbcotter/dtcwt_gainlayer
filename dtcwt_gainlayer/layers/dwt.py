@@ -172,3 +172,89 @@ class ReLUWaveCoeffs(nn.Module):
         yl = func.relu(yl)
         yh = [func.relu(b) for b in yh]
         return yl, yh
+
+
+class WaveParamLayer(nn.Module):
+    """ Parameterizes gains in the DTCWT domain
+
+    Inputs:
+        C: Number of input channels
+        F: number of output channels
+        k: a power of 2
+        J: an integer
+    """
+    def __init__(self, C, F, k=4, stride=1, J=1, wd=0, wd1=None, right=True):
+        super().__init__()
+        self.wd = wd
+        if wd1 is None:
+            self.wd1 = wd
+        else:
+            self.wd1 = wd1
+        self.C = C
+        self.F = F
+        x = torch.zeros(F, C, k, k)
+        torch.nn.init.xavier_uniform_(x)
+        xfm = DWTForward(J=J)
+        self.ifm = DWTInverse()
+        yl, yh = xfm(x)
+        self.J = J
+        if k == 4 and J == 1:
+            self.gl = nn.Parameter(torch.zeros_like(yl))
+            self.gh = nn.Parameter(torch.zeros_like(yh[0]))
+            self.gl.data = yl.data
+            self.gh.data = yh[0].data
+            if right:
+                self.pad = (1, 2, 1, 2)
+            else:
+                self.pad = (2, 1, 2, 1)
+        elif k == 8 and J == 1:
+            self.gl = nn.Parameter(torch.zeros_like(yl))
+            self.gh = nn.Parameter(torch.zeros_like(yh[0]))
+            self.gl.data = yl.data
+            self.gh.data = yh[0].data
+            if right:
+                self.pad = (3, 4, 3, 4)
+            else:
+                self.pad = (4, 3, 4, 3)
+        elif k == 8 and J == 2:
+            self.gl = nn.Parameter(torch.zeros_like(yl))
+            self.gh = nn.Parameter(torch.zeros_like(yh[1]))
+            self.gl.data = yl.data
+            self.gh.data = yh[1].data
+            if right:
+                self.pad = (3, 4, 3, 4)
+            else:
+                self.pad = (4, 3, 4, 3)
+        elif k == 8 and J == 3:
+            self.gl = nn.Parameter(torch.zeros_like(yl))
+            self.gh = nn.Parameter(torch.zeros_like(yh[2]))
+            self.gl.data = yl.data
+            self.gh.data = yh[2].data
+            if right:
+                self.pad = (3, 4, 3, 4)
+            else:
+                self.pad = (4, 3, 4, 3)
+        else:
+            raise NotImplementedError
+
+    def forward(self, x):
+        gl = self.gl
+        if self.J == 1:
+            h = self.ifm((gl, (self.gh,)))
+        elif self.J == 2:
+            h = self.ifm((gl, (None, self.gh)))
+        elif self.J == 3:
+            h = self.ifm((gl, (None, None, self.gh)))
+
+        x = torch.nn.functional.pad(x, self.pad)
+        y = func.conv2d(x, h)
+        return y
+
+    def get_reg(self):
+        a = self.wd*0.5*torch.sum(self.gl**2)
+        a += self.wd1*torch.sum(torch.abs(self.gh))
+        return a
+
+    def extra_repr(self):
+        return '(g_lp): Parameter of type {} with size: {}'.format(
+            self.g_lp.type(), 'x'.join([str(x) for x in self.g_lp.shape]))
