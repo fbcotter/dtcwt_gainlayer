@@ -2,13 +2,13 @@
 This script allows you to run a host of tests on the invariant layer and
 slightly different variants of it on CIFAR.
 """
-from shutil import copyfile
+from save_exp import save_experiment_info, save_acc
 import argparse
 import os
 import torch
 import torch.nn as nn
 import time
-from dtcwt_gainlayer.layers.dwt import WaveConvLayer
+from dtcwt_gainlayer.layers.dtcwt import WaveParamLayer
 import torch.nn.functional as func
 import numpy as np
 import random
@@ -61,8 +61,6 @@ parser.add_argument('--wd', default=1e-4, type=float, help='weight decay')
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
-parser.add_argument('-q', default=1, type=float,
-                    help='proportion of activations to keep')
 
 
 # Define the options of networks. The 4 parameters are:
@@ -75,46 +73,63 @@ parser.add_argument('-q', default=1, type=float,
 # The dictionary 'nets' has 14 different layouts of vgg nets networks with 0,
 # 1 or 2 invariant layers at different depths.
 C = 96
+param = (4, 2)
 nets = {
-    'gainA': [('gain', (3, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainB': [('conv', 3, 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainC': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-              ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainD': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainE': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-              ('gain', (3, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainF': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-              ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-              ('conv', 3, 2*C, 4*C), ('gain', (3, (1,)), 4*C, 4*C)],
-    'gainAB': [('gain', (3, (1,)), 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainBC': [('conv', 3, 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
-               ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainCD': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (3, (1,)), C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainDE': [('conv', 3, 3, C), ('conv', 3, C, C),('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('gain', (3, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainAC': [('gain', (3, (1,)), 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C),('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainBD': [('conv', 3, 3, C), ('gain', (3, (1,)), C, C), ('pool', 0, 1, None),
-               ('conv', 3, C, 2*C), ('gain', (3, (1,)), 2*C, 2*C), ('pool', 0, 2, None),
-               ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
-    'gainCE': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
-               ('gain', (3, (1,)), C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
-               ('gain', (3, (1,)), 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+    'reparamA': [('reparam', param, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                 ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                 ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamB': [('conv', 3, 3, C), ('reparam', param, C, C), ('pool', 0, 1, None),
+                 ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                 ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamC': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                 ('reparam', param, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                 ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamD': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                 ('conv', 3, C, 2*C), ('reparam', param, 2*C, 2*C), ('pool', 0, 2, None),
+                 ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamE': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                 ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                 ('reparam', param, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamF': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                 ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                 ('conv', 3, 2*C, 4*C), ('reparam', param, 4*C, 4*C)],
+
+    'reparamAB': [('reparam', param, 3, C), ('reparam', param, C, C), ('pool', 0, 1, None),
+                  ('conv', 3, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamBC': [('conv', 3, 3, C), ('reparam', param, C, C), ('pool', 0, 1, None),
+                  ('reparam', param, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamCD': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                  ('reparam', param, C, 2*C), ('reparam', param, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamDE': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                  ('conv', 3, C, 2*C), ('reparam', param, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('reparam', param, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamAC': [('reparam', param, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                  ('reparam', param, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamBD': [('conv', 3, 3, C), ('reparam', param, C, C), ('pool', 0, 1, None),
+                  ('conv', 3, C, 2*C), ('reparam', param, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('conv', 3, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparamCE': [('conv', 3, 3, C), ('conv', 3, C, C), ('pool', 0, 1, None),
+                  ('reparam', param, C, 2*C), ('conv', 3, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('reparam', param, 2*C, 4*C), ('conv', 3, 4*C, 4*C)],
+
+    'reparam_all': [('reparam', param, 3, C), ('reparam', param, C, C), ('pool', 0, 1, None),
+                  ('reparam', param, C, 2*C), ('reparam', param, 2*C, 2*C), ('pool', 0, 2, None),
+                  ('reparam', param, 2*C, 4*C), ('reparam', param, 4*C, 4*C)],
 }
 
 allnets = {
@@ -130,7 +145,7 @@ class MixedNet(nn.Module):
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type, q=1.):
+    def __init__(self, dataset, type):
         super().__init__()
 
         # Define the number of scales and classes dependent on the dataset
@@ -147,6 +162,7 @@ class MixedNet(nn.Module):
         layers = allnets[type]
         blks = []
         layer = 0
+        right = True
         for blk, k, C1, C2 in layers:
             if blk == 'conv':
                 name = 'conv' + chr(ord('A') + layer)
@@ -159,13 +175,14 @@ class MixedNet(nn.Module):
             elif blk == 'pool':
                 name = 'pool' + str(C1)
                 blk = nn.MaxPool2d(2)
-            elif blk == 'gain':
-                name = 'gain' + chr(ord('A') + layer)
+            elif blk == 'reparam':
+                name = 'reparam' + chr(ord('A') + layer)
                 # Add a triple of layers for each invariant layer
                 blk = nn.Sequential(
-                    WaveConvLayer(C1, C2, k[0], k[1], q=q, wave='db2'),
+                    WaveParamLayer(C1, C2, k[0], J=k[1], right=right),
                     nn.BatchNorm2d(C2),
                     nn.ReLU())
+                right = right ^ right
                 layer += 1
             # Add the name and block to the list
             blks.append((name, blk))
@@ -260,7 +277,7 @@ class TrainNET(BaseClass):
         if type_.startswith('ref'):
             θ = (0.1, 0.9, 1e-4, 1)
         elif type_ in nets.keys():
-            θ = (0.1, 0.85, 1e-4, 0.8)
+            θ = (0.1, 0.85, 1e-4, 0.5)
         else:
             θ = (0.45, 0.8, 1e-4, 1)
             #  raise ValueError('Unknown type')
@@ -273,7 +290,7 @@ class TrainNET(BaseClass):
         std = config.get('std', 1.0)
 
         # Build the network
-        self.model = MixedNet(args.dataset, type_, q)
+        self.model = MixedNet(args.dataset, type_)
         init = lambda x: net_init(x, std)
         self.model.apply(init)
 
@@ -293,7 +310,7 @@ class TrainNET(BaseClass):
         gain_params = []
         for name, module in model.net.named_children():
             params = [p for p in module.parameters() if p.requires_grad]
-            if name.startswith('gain'):
+            if name.startswith('reparam'):
                 gain_params += params
             else:
                 default_params += params
@@ -345,7 +362,7 @@ if __name__ == "__main__":
             type_ = args.type[0]
         py3nvml.grab_gpus(ceil(args.num_gpus))
         cfg = {'args': args, 'type': type_, 'num_gpus': args.num_gpus,
-               'lr': args.lr, 'mom': args.mom, 'wd': args.wd, 'q': args.q}
+               'lr': args.lr, 'mom': args.mom, 'wd': args.wd}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
 
@@ -455,7 +472,7 @@ if __name__ == "__main__":
                         "mom": tune.grid_search([0.8]),
                         "q": tune.grid_search([1]),
                         #  "wd": tune.grid_search([1e-5, 1e-1e-4]),
-                        #  "std": tune.grid_search([0.5, 1.5])
+                        "std": tune.grid_search([1.])
                     }
                 }
             },

@@ -2,7 +2,7 @@
 This script allows you to run a host of tests on the invariant layer and
 slightly different variants of it on CIFAR.
 """
-from shutil import copyfile
+from save_exp import save_experiment_info, save_acc
 import argparse
 import os
 import torch
@@ -17,6 +17,8 @@ from dtcwt_gainlayer.data import cifar, tiny_imagenet
 from dtcwt_gainlayer import optim
 from tune_trainer import BaseClass, get_hms, net_init
 from tensorboardX import SummaryWriter
+import py3nvml
+from math import ceil
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Example')
@@ -33,6 +35,8 @@ parser.add_argument('--dataset', default='cifar100', type=str,
                     choices=['cifar10', 'cifar100', 'tiny_imagenet'])
 parser.add_argument('--trainsize', default=-1, type=int,
                     help='size of training set')
+parser.add_argument('--resume', action='store_true',
+                    help='Rerun from a checkpoint')
 parser.add_argument('--no-comment', action='store_true',
                     help='Turns off prompt to enter comments about run.')
 parser.add_argument('--nsamples', type=int, default=0,
@@ -51,9 +55,14 @@ invariant layers at different depths). Can also specify to run "nets1" or
 Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
 
 # Core hyperparameters
+parser.add_argument('--lr', default=0.45, type=float, help='learning rate')
+parser.add_argument('--mom', default=0.8, type=float, help='momentum')
+parser.add_argument('--wd', default=1e-4, type=float, help='weight decay')
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
+parser.add_argument('-q', default=1, type=float,
+                    help='proportion of activations to keep')
 
 
 # Define the options of networks. The 4 parameters are:
@@ -122,7 +131,7 @@ class MixedNet(nn.Module):
     task
     """
     def __init__(self, dataset, type, q=1.):
-        super().__init__(dataset)
+        super().__init__()
 
         # Define the number of scales and classes dependent on the dataset
         if dataset == 'cifar10':
@@ -220,26 +229,30 @@ class TrainNET(BaseClass):
         if hasattr(args, 'verbose'):
             self._verbose = args.verbose
 
+        num_workers = 4
         if args.seed is not None:
             np.random.seed(args.seed)
             random.seed(args.seed)
             torch.manual_seed(args.seed)
+            num_workers = 0
             if self.use_cuda:
                 torch.cuda.manual_seed(args.seed)
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
 
         # ######################################################################
         #  Data
-        kwargs = {'num_workers': 4, 'pin_memory': True} if self.use_cuda else {}
+        kwargs = {'num_workers': num_workers, 'pin_memory': True} if self.use_cuda else {}
         if args.dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=args.dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
-                seed=args.seed, **kwargs)
+                **kwargs)
         elif args.dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
-                seed=args.seed, distributed=False, **kwargs)
+                distributed=False, **kwargs)
 
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
@@ -247,7 +260,7 @@ class TrainNET(BaseClass):
         if type_.startswith('ref'):
             θ = (0.1, 0.9, 1e-4, 1)
         elif type_ in nets.keys():
-            θ = (0.1, 0.85, 1e-4, 0.5)
+            θ = (0.1, 0.85, 1e-4, 0.8)
         else:
             θ = (0.45, 0.8, 1e-4, 1)
             #  raise ValueError('Unknown type')
@@ -324,18 +337,23 @@ if __name__ == "__main__":
         val_writer = SummaryWriter(os.path.join(outdir, 'val'))
         if not os.path.exists(outdir):
             os.mkdir(outdir)
-        # Copy this source file to the output directory for record keeping
-        copyfile(__file__, os.path.join(outdir, 'search.py'))
-        copyfile('tune_trainer.py', os.path.join(outdir, 'tune_trainer.py'))
 
         # Choose the model to run and build it
         if args.type is None:
             type_ = 'ref2'
         else:
             type_ = args.type[0]
-        cfg = {'args': args, 'type': type_, 'num_gpus': args.num_gpus}
+        py3nvml.grab_gpus(ceil(args.num_gpus))
+        cfg = {'args': args, 'type': type_, 'num_gpus': args.num_gpus,
+               'lr': args.lr, 'mom': args.mom, 'wd': args.wd, 'q': args.q}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
+
+        # Copy this source file to the output directory for record keeping
+        if args.resume:
+            trn._restore(os.path.join(outdir, 'model_last.pth'))
+        else:
+            save_experiment_info(outdir, args.seed, args.no_comment, trn.model)
 
         # Train for set number of epochs
         elapsed_time = 0
@@ -374,6 +392,7 @@ if __name__ == "__main__":
             # Update the scheduler
             trn.step_lr()
 
+        save_acc(outdir, best_acc, acc)
     # We are using a scheduler
     else:
         # Create the training object
@@ -387,7 +406,7 @@ if __name__ == "__main__":
         if not os.path.exists(outdir):
             os.mkdir(outdir)
         # Copy this source file to the output directory for record keeping
-        copyfile(__file__, os.path.join(outdir, 'search.py'))
+        save_experiment_info(outdir, args.seed, args.no_comment)
 
         # Build the scheduler
         sched = AsyncHyperBandScheduler(

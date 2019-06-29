@@ -10,12 +10,11 @@ import sys
 import os
 import time
 import git
-from shutil import copyfile
-import dtcwt_gainlayer
-import dtcwt_gainlayer.layers.dtcwt as layers
+import shutil
 
-TEMPLATE = """CIFAR Experiment
-================
+
+TEMPLATE = """ICIP Experiment
+===============
 
 This experiment was run on {day} at {time}.
 The command used to run the program was:
@@ -41,10 +40,13 @@ Description
 """
 
 ACC_TEMPLATE = """
-Best Acc
---------
-The best validation accuracy was {acc:.2f}%
+Best Result
+-----------
+The best acc was {best:.3f} and the last acc was {last:.3f}
 """
+
+FOLD_TEMPLATE = """
+Fold {k}: {best:.3f}"""
 
 
 def get_githash(module):
@@ -64,7 +66,7 @@ def break_run_cmd(params):
 
 def get_num_params(net):
     n = 0
-    if n is None:
+    if net is None:
         return '?'
     else:
         for p in net.parameters():
@@ -82,31 +84,23 @@ def get_num_params(net):
         return s
 
 
-def save_experiment_info(outdir, nettype, seed, no_comment=False,
-                         exist_ok=False, net=None):
+def save_experiment_info(outdir, seed, no_comment=False, net=None):
     """ Creates an experiment info file in the output directory
 
     Args:
         outdir: the output directory
-        nettype: the network used
         net: the network object
 
     Returns:
         None
     """
-    if os.path.exists(outdir):
-        if 'debug' not in outdir and not exist_ok:
-            raise ValueError('Output directory already exists')
-    else:
-        os.mkdir(outdir)
-
     file = os.path.join(outdir, 'INFO.rst')
     with open(file, 'w') as f:
         f.write(TEMPLATE.format(
             day=time.strftime('%Y/%m/%d'),
             time=time.strftime("%H-%M-%S", time.gmtime(time.time())),
             runcmd='python {}'.format(' '.join(sys.argv)),
-            githash=get_githash(dtcwt_gainlayer),
+            githash="?",
             seed=seed,
             num_params=get_num_params(net)
         ))
@@ -114,20 +108,36 @@ def save_experiment_info(outdir, nettype, seed, no_comment=False,
         os.system('vim + {file}'.format(file=file))
 
     print('Saved info file. Copying source')
-    main = os.path.join(os.path.dirname(__file__), '..', 'main.py')
-    learn = os.path.join(os.path.dirname(__file__), 'learn.py')
-    netf = os.path.join(os.path.dirname(__file__), 'networks',
-                        nettype + '.py')
-    layerf = layers.__file__
-    copyfile(main, os.path.join(outdir, 'main.py'))
-    copyfile(learn, os.path.join(outdir, 'learn.py'))
-    copyfile(netf, os.path.join(outdir, 'net.py'))
-    copyfile(layerf, os.path.join(outdir, 'dtcwt_layers.py'))
+    copytree(os.path.join(os.path.dirname(__file__), '..'), outdir)
 
 
-def save_acc(outdir, acc):
+def copytree(src, dst):
+    """ Copies all the python files in src to dst recursively"""
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(dst, item)
+        if os.path.isdir(s):
+            if not os.path.isdir(d):
+                os.mkdir(d)
+            copytree(s, d)
+        elif os.path.splitext(s)[1] == '.py':
+            if not os.path.exists(d):
+                shutil.copy2(s, d)
+
+
+def save_acc(outdir, best, last):
     """ Append the best accuracy to the info file"""
     file = os.path.join(outdir, 'INFO.rst')
     if os.path.exists(file):
         with open(file, 'a') as f:
-            f.write(ACC_TEMPLATE.format(acc=acc))
+            f.write(ACC_TEMPLATE.format(best=best, last=last))
+
+
+def save_kfoldacc(outdir, fold, r2):
+    """ Append the best accuracy to the info file"""
+    file = os.path.join(outdir, 'INFO.rst')
+    if os.path.exists(file):
+        with open(file, 'a') as f:
+            if fold == 0:
+                f.write("\nKFOLD Results\n-------------")
+            f.write(FOLD_TEMPLATE.format(k=fold, best=r2))
