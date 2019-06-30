@@ -134,21 +134,32 @@ class WaveConvLayer(nn.Module):
         bp_sizes: Spatial size of bandpass filters
         q: the proportion of actiavtions to keep
         mode: the padding mode for convolution
+        xfm: true indicating should take dtcwt of input, false to skip
+        ifm: true indicating should take inverse dtcwt of output, false to skip
     """
     def __init__(self, C, F, lp_size=3, bp_sizes=(1,), q=1.0, wave='db2',
-                 mode='zero'):
+                 mode='zero', xfm=True, ifm=True):
         super().__init__()
         self.C = C
         self.F = F
         self.J = len(bp_sizes)
 
-        self.XFM = DWTForward(J=self.J, mode=mode, wave=wave)
+        if xfm:
+            self.XFM = DWTForward(J=self.J, mode=mode, wave=wave)
+        else:
+            self.XFM = lambda x: x
+
         if q < 0:
             self.shrink = ReLUWaveCoeffs()
         else:
             self.shrink = lambda x: x
+
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
-        self.IFM = DWTInverse(mode=mode, wave=wave)
+
+        if ifm:
+            self.IFM = DWTInverse(mode=mode, wave=wave)
+        else:
+            self.IFM = lambda x: x
 
     def forward(self, x):
         u_lp, u = self.XFM(x)
@@ -169,7 +180,7 @@ class ReLUWaveCoeffs(nn.Module):
         """ Bandpass input comes in as a tensor of shape (N, C, 3, H, W).
         Need to do the relu independently on real and imaginary parts """
         yl, yh = x
-        yl = func.relu(yl)
+        #  yl = func.relu(yl)
         yh = [func.relu(b) for b in yh]
         return yl, yh
 

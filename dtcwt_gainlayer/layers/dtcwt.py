@@ -173,7 +173,7 @@ class WaveConvLayer(nn.Module):
 
         # The inverse
         if ifm:
-            self.IFM = DTCWTInverse(biort=biort, qshift=qshift, J=self.J)
+            self.IFM = DTCWTInverse(biort=biort, qshift=qshift)
         else:
             self.IFM = lambda x: x
 
