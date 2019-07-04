@@ -9,7 +9,8 @@ import torch
 import torch.nn as nn
 import time
 from dtcwt_gainlayer.layers.dtcwt import WaveConvLayer
-from dtcwt_gainlayer.layers.dwt import WaveConvLayer as WaveConvLayer_dwt
+from dtcwt_gainlayer.layers.nonlinear import PassThrough
+
 import torch.nn.functional as func
 import numpy as np
 import random
@@ -50,12 +51,6 @@ parser.add_argument('--epochs', default=120, type=int, help='num epochs')
 parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
 parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
-parser.add_argument('--type', default=None, type=str, nargs='+',
-                    help='''Model type(s) to build. If left blank, will run 14
-networks consisting of those defined by the dictionary "nets" (0, 1, or 2
-invariant layers at different depths). Can also specify to run "nets1" or
-"nets2", which swaps out the invariant layers for other iterations.
-Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
 
 # Core hyperparameters
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -70,17 +65,11 @@ parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
 parser.add_argument('--opt1', default='sgd', type=str, help='gainlayer opt')
 parser.add_argument('-q', default=1, type=float,
                     help='proportion of activations to keep')
-
-
-nets = {
-    'ref': ['conv', 'pool', 'conv', 'pool', 'conv'],
-    'gainA': ['gain', 'pool', 'conv', 'pool', 'conv'],
-    'gainB': ['conv', 'pool', 'gain', 'pool', 'conv'],
-    'gainC': ['conv', 'pool', 'conv', 'pool', 'gain'],
-    'gainD': ['gain', 'pool', 'gain', 'pool', 'conv'],
-    'gainE': ['conv', 'pool', 'gain', 'pool', 'gain'],
-    'gainF': ['gain', 'pool', 'gain', 'pool', 'gain'],
-}
+parser.add_argument('--pixel_nl', default='relu', type=str)
+parser.add_argument('--lp_nl', default='none', type=str)
+parser.add_argument('--bp_nl', default='none', type=str)
+parser.add_argument('--lp_q', default=0.8, type=float)
+parser.add_argument('--bp_q', default=0.8, type=float)
 
 
 class MixedNet(nn.Module):
@@ -88,92 +77,63 @@ class MixedNet(nn.Module):
     a normal network. You can change the ordering below to suit your
     task
     """
-    def __init__(self, dataset, type, use_dwt=False, num_channels=64,
-                 wd=1e-4, wd1=None):
+    def __init__(self, dataset, num_channels=64, wd=1e-4, wd1=None,
+                 pixel_nl='relu', lp_nl='none', bp_nl='none',
+                 lp_nl_kwargs={}, bp_nl_kwargs={}):
         super().__init__()
 
         # Define the number of scales and classes dependent on the dataset
         if dataset == 'cifar10':
             self.num_classes = 10
-            self.S = 3
         elif dataset == 'cifar100':
             self.num_classes = 100
-            self.S = 3
         elif dataset == 'tiny_imagenet':
             self.num_classes = 200
-            self.S = 4
         self.wd = wd
         self.wd1 = wd1
+        C = num_channels
 
-        layers = nets[type]
-        blks = []
-        # A letter counter for the layer number
-        layer = 0
-        # The number of input (C1) and output (C2) channels. The channels double
-        # after a pooling layer
-        C1 = 3
-        C2 = num_channels
-        # A number for the pooling layer
-        pool = 1
+        # Call the DTCWT conv layer
+        WaveLayer = lambda C1, C2: WaveConvLayer(
+            C1, C2, 3, (1,), wd=wd, wd1=wd1, lp_nl=lp_nl, bp_nl=(bp_nl,),
+            lp_nl_kwargs=lp_nl_kwargs, bp_nl_kwargs=bp_nl_kwargs)
 
-        # Call the DWT or the DTCWT conv layer
-        if use_dwt:
-            WaveLayer = lambda x, y: WaveConvLayer_dwt(x, y, 3, (1,))
+        if pixel_nl == 'relu':
+            nl = nn.ReLU
         else:
-            WaveLayer = lambda x, y: WaveConvLayer(x, y, 3, (1,), wd=wd, wd1=wd1)
+            nl = PassThrough
+        PixelLayer = lambda C: nn.Sequential(
+            nn.BatchNorm2d(C),
+            nl(),
+            nn.MaxPool2d(2)
+        )
 
-        for blk in layers:
-            if blk == 'conv':
-                name = 'conv' + chr(ord('A') + layer)
-                # Add a triple of layers for each convolutional layer
-                blk = nn.Sequential(
-                    nn.Conv2d(C1, C2, 5, padding=2, stride=1),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
-                # The next layer's input channels becomes this layer's output
-                # channels
-                C1 = C2
-                # Increase the layer counter
-                layer += 1
-            elif blk == 'gain':
-                name = 'gain' + chr(ord('A') + layer)
-                blk = nn.Sequential(
-                    WaveLayer(C1, C2),
-                    nn.BatchNorm2d(C2),
-                    nn.ReLU())
-                C1 = C2
-                layer += 1
-            elif blk == 'pool':
-                name = 'pool' + str(pool)
-                blk = nn.MaxPool2d(2)
-                pool += 1
-                C2 = 2*C1
-            # Add the name and block to the list
-            blks.append((name, blk))
+        blks = [('wave1', WaveLayer(3, C)),
+                ('pixel1', PixelLayer(C)),
+                ('wave2', WaveLayer(C, 2*C)),
+                ('pixel2', PixelLayer(2*C)),
+                ('wave3', WaveLayer(2*C, 4*C)),
+                ('pixel3', PixelLayer(4*C))]
 
         # F is the last output size from first 6 layers
         if dataset == 'cifar10' or dataset == 'cifar100':
             # Network is 3 stages of convolution
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
-            self.fc1 = nn.Linear(C2, self.num_classes)
+            self.fc1 = nn.Linear(4*C, self.num_classes)
         elif dataset == 'tiny_imagenet':
             blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
-                nn.Conv2d(C2, 2*C2, 5, padding=2, stride=1),
-                nn.BatchNorm2d(2*C2),
+                nn.Conv2d(4*C, 8*C, 5, padding=2, stride=1),
+                nn.BatchNorm2d(8*C),
                 nn.ReLU())
-            #  blk3 = nn.Sequential(
-                #  nn.Conv2d(2*C2, 2*C2, 3, padding=1, stride=1),
-                #  nn.BatchNorm2d(2*C2),
-                #  nn.ReLU())
             blks = blks + [
                 ('pool3', blk1),
                 ('conv_final', blk2),]
                 #  ('convH', blk3)]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
-            self.fc1 = nn.Linear(2*C2, self.num_classes)
+            self.fc1 = nn.Linear(8*C, self.num_classes)
 
     def forward(self, x):
         """ Define the default forward pass"""
@@ -196,20 +156,38 @@ class TrainNET(BaseClass):
     config is a dictionary with keys::
 
         - args: The parser arguments
-        - type: The network type, a letter value between 'A' and 'N'. See above
-            for what this represents.
-        - lr (optional): the learning rate
-        - momentum (optional): the momentum
-        - wd (optional): the weight decay
-        - std (optional): the initialization variance
     """
     def _setup(self, config):
         args = config.pop("args")
         vars(args).update(config)
-        type_ = config.get('type', 'gainA')
-        use_dwt = config.get('dwt', False)
-        C = config.get('num_channels', 64)
+        # Parameters like learning rate and momentum can be speicified by the
+        # config search space. If not specified, fall back to the args
+        lr = config.get('lr', args.lr)
+        mom = config.get('mom', args.mom)
+        wd = config.get('wd', args.wd)
+        C = config.get('num_channels', args.C)
         dataset = config.get('dataset', args.dataset)
+
+        # Get optimizer parameters for gainlayer
+        mom1 = config.get('mom1', args.mom1)
+        lr1 = config.get('lr1', args.lr1)
+        wd1 = config.get('wd1', args.wd1)
+        opt1 = config.get('opt1', args.opt1)
+        gamma1 = config.get('gamma1', 0.2)
+        if mom1 is None:
+            mom1 = mom
+        if lr1 is None:
+            lr1 = lr
+
+        # Get nonlinearity options
+        pixel_nl = config.get('pixel_nl', args.pixel_nl)
+        lp_nl = config.get('lp_nl', args.lp_nl)
+        bp_nl = config.get('bp_nl', args.bp_nl)
+        lp_q = config.get('lp_q', args.lp_q)
+        bp_q = config.get('bp_q', args.bp_q)
+        lp_thresh = config.get('lp_thresh', 1)
+        bp_thresh = config.get('bp_thresh', 1)
+
         if hasattr(args, 'verbose'):
             self._verbose = args.verbose
 
@@ -239,22 +217,13 @@ class TrainNET(BaseClass):
         # ######################################################################
         # Build the network based on the type parameter. θ are the optimal
         # hyperparameters found by cross validation.
-        if type_.startswith('ref'):
-            θ = (0.1, 0.9, 1e-4)
-        else:
-            θ = (0.45, 0.8, 1e-4)
-            #  raise ValueError('Unknown type')
-        lr, mom, wd = θ
-        # If the parameters were provided as an option, use them
-        lr = config.get('lr', lr)
-        mom = config.get('mom', mom)
-        wd = config.get('wd', wd)
-        wd1 = config.get('wd1', wd)
-        std = config.get('std', 1.0)
 
         # Build the network
-        self.model = MixedNet(args.dataset, type_, use_dwt, C, wd, wd1)
-        init = lambda x: net_init(x, std)
+        self.model = MixedNet(args.dataset, C, wd, wd1,
+                              pixel_nl=pixel_nl, lp_nl=lp_nl, bp_nl=bp_nl,
+                              lp_nl_kwargs=dict(q=lp_q, thresh=lp_thresh),
+                              bp_nl_kwargs=dict(q=bp_q, thresh=bp_thresh))
+        init = lambda x: net_init(x, 1.0)
         self.model.apply(init)
 
         # Split across GPUs
@@ -273,7 +242,7 @@ class TrainNET(BaseClass):
         gain_params = []
         for name, module in model.net.named_children():
             params = [p for p in module.parameters() if p.requires_grad]
-            if name.startswith('gain'):
+            if name.startswith('wave'):
                 gain_params += params
             else:
                 default_params += params
@@ -284,16 +253,6 @@ class TrainNET(BaseClass):
             max_epochs=args.epochs)
 
         if len(gain_params) > 0:
-            # Get special optimizer parameters
-            lr1 = config.get('lr1', lr)
-            gamma1 = config.get('gamma1', 0.2)
-            mom1 = config.get('mom1', mom)
-            opt1 = config.get('opt1', 'sgd')
-            if lr1 is None:
-                lr1 = lr
-            if mom1 is None:
-                mom1 = mom
-
             # Do not use the optimizer's weight decay, call a special method to
             # do it.
             self.optimizer1, self.scheduler1 = optim.get_optim(
@@ -324,16 +283,8 @@ if __name__ == "__main__":
         if not os.path.exists(outdir):
             os.mkdir(outdir)
 
-        # Choose the model to run and build it
-        if args.type is None:
-            type_ = 'ref'
-        else:
-            type_ = args.type[0]
         py3nvml.grab_gpus(ceil(args.num_gpus))
-        cfg = {'args': args, 'type': type_, 'num_gpus': args.num_gpus,
-               'dwt': args.dwt, 'C': args.C,
-               'lr': args.lr, 'lr1': args.lr1, 'mom': args.mom, 'mom1': args.mom1,
-               'wd': args.wd, 'q': args.q, 'wd1': args.wd1, 'opt1': args.opt1}
+        cfg = {'args': args, 'num_gpus': args.num_gpus}
         trn = TrainNET(cfg)
         trn._final_epoch = args.epochs
 
@@ -407,15 +358,6 @@ if __name__ == "__main__":
             max_t=200,
             grace_period=120)
 
-        # Select which networks to run
-        if args.type is not None:
-            if len(args.type) == 1 and args.type[0] == 'nets':
-                type_ = list(nets.keys())
-            else:
-                type_ = args.type
-        else:
-            type_ = list(nets.keys())
-
         tune.run(
             TrainNET,
             name=exp_name,
@@ -433,13 +375,12 @@ if __name__ == "__main__":
                 "args": args,
                 "dataset": args.dataset,
                 #  "dataset": tune.grid_search(['cifar100']),
-                "type": tune.grid_search(type_),
-                "lr": tune.grid_search([0.5]),
-                "mom": tune.grid_search([0.85]),
-                "wd": tune.grid_search([1e-4]),
-                "wd1": tune.grid_search([1e-5]),
-                #  #  "std": tune.grid_search([1.]),
-                #  "dwt": args.dwt,
-                #  "num_channels": args.C,
+                "lr": 0.5, "mom": 0.85, "wd": 1e-4, "wd1": 1e-5,
+                "lp_q": 0.8, "bp_q": 0.8,
+                "pixel_nl": tune.grid_search(['relu', 'none']),
+                "lp_nl": tune.grid_search(['none', 'relu', 'hardshrink_std',
+                                           'softshrink_std']),
+                "bp_nl": tune.grid_search(['none', 'relu', 'mag',
+                                           'hardshrink_std', 'softshrink_std']),
             },
             verbose=1)
