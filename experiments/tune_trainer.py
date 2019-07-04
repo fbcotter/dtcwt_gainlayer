@@ -12,6 +12,7 @@ import torch
 import sys
 import os
 from math import sqrt
+from torch.autograd import detect_anomaly
 
 import torch.nn.init as init
 
@@ -125,6 +126,7 @@ class BaseClass(Trainable):
         update_steps = np.linspace(
             int(1/4 * num_iter), num_iter-1, 4).astype('int')
 
+        #  with detect_anomaly():
         for batch_idx, (data, target) in enumerate(self.train_loader):
             if self.use_cuda:
                 data, target = data.cuda(), target.cuda()
@@ -132,6 +134,12 @@ class BaseClass(Trainable):
 
             output = self.model(data)
             loss = func.nll_loss(output, target)
+            if torch.isnan(loss):
+                raise ValueError(
+                    "Nan found in training at epoch {}".format(self.last_epoch))
+            for m in self.model.modules():
+                if hasattr(m, 'get_reg'):
+                    loss += m.get_reg()
             loss.backward()
             self.opt_step()
 
@@ -150,12 +158,14 @@ class BaseClass(Trainable):
 
                 sys.stdout.write('\r')
                 sys.stdout.write(
-                    '| Epoch [{:3d}/{:3d}] Iter[{:3d}/{:3d}]\t\tLoss: {:.4f}\t'
-                    'Acc@1: {:.3f}%\tAcc@5: {:.3f}%\tElapsed Time: '
-                    '{:.1f}min'.format(
+                    '| Epoch [{:3d}/{:3d}] Iter[{:3d}/{:3d}]\t\t'
+                    'Loss: {:.4f}\tAcc@1: {:.3f}%\tAcc@5: {:.3f}%\t'
+                    'Elapsed Time: {:.1f}min'.format(
                         self.last_epoch, self.final_epoch, batch_idx+1,
-                        num_iter, loss_update/update, 100. * top1_update/update,
-                        100. * top5_update/update, (time.time()-start)/60))
+                        num_iter, loss_update/update,
+                        100. * top1_update/update,
+                        100. * top5_update/update,
+                        (time.time()-start)/60))
                 sys.stdout.flush()
                 # Every update_steps, print a new line
                 if batch_idx in update_steps:
