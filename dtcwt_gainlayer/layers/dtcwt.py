@@ -4,6 +4,7 @@ import torch.nn.functional as func
 import math
 import numpy as np
 from pytorch_wavelets import DTCWTForward, DTCWTInverse
+from dtcwt_gainlayer.layers.nonlinear import WaveNonLinearity
 
 
 class WaveGainLayer(nn.Module):
@@ -14,6 +15,8 @@ class WaveGainLayer(nn.Module):
         F: number of output channels
         lp_size: Spatial size of lowpass filter
         bp_sizes: Spatial size of bandpass filters
+        wd: l2 weight decay for lowpass gain
+        wd1: l1 weight decay for bandpass gain. If None, uses wd and l2.
 
 
     The forward pass should be provided with a tuple of wavelet coefficients.
@@ -26,9 +29,11 @@ class WaveGainLayer(nn.Module):
     Returns a tuple of tensors of the same form as the input, but with F output
     channels.
     """
-    def __init__(self, C, F, lp_size=3, bp_sizes=(1,1), lp_stride=1,
-                 bp_strides=(1,1)):
+    def __init__(self, C, F, lp_size=3, bp_sizes=(1,), lp_stride=1,
+                 bp_strides=(1,), wd=0, wd1=None):
         super().__init__()
+        self.wd = wd
+        self.wd1 = wd1
         self.C = C
         self.F = F
         self.lp_size = lp_size
@@ -62,8 +67,7 @@ class WaveGainLayer(nn.Module):
             "match number of filters"
 
         if self.g_lp is None or self.g_lp.shape == torch.Size([0]):
-            s = u_lp.shape
-            v_lp = torch.zeros((s[0], self.F, s[2], s[3]), device=u_lp.device)
+            v_lp = torch.zeros_like(u_lp)
         else:
             v_lp = func.conv2d(u_lp, self.g_lp, padding=self.lp_pad)
 
@@ -73,9 +77,7 @@ class WaveGainLayer(nn.Module):
             u_j = u[j]
             pad = self.bp_pad[j]
             if g_j is None or g_j.shape == torch.Size([0]):
-                s = u_j.shape
-                v.append(torch.zeros((s[0], self.F, s[2], s[3], s[4], s[5]),
-                                     device=u_j.device))
+                v.append(torch.zeros_like(u_j))
             else:
                 # Do the mixing for each orientation independently
                 bands = []
@@ -119,6 +121,16 @@ class WaveGainLayer(nn.Module):
                 with torch.no_grad():
                     g_j.uniform_(-a, a)
 
+    def get_reg(self):
+        a = self.wd*0.5*torch.sum(self.g_lp**2)
+        if self.wd1 is not None:
+            for g in self.g:
+                a += self.wd1 * torch.sum(torch.sqrt(g[:,0]**2 + g[:,1]**2))
+        else:
+            for g in self.g:
+                a += 0.5 * self.wd * torch.sum(g**2)
+        return a
+
     def extra_repr(self):
         return '(g_lp): Parameter of type {} with size: {}'.format(
             self.g_lp.type(), 'x'.join([str(x) for x in self.g_lp.shape]))
@@ -141,10 +153,18 @@ class WaveConvLayer(nn.Module):
         q: the proportion of actiavtions to keep
         xfm: true indicating should take dtcwt of input, false to skip
         ifm: true indicating should take inverse dtcwt of output, false to skip
+        wd: l2 weight decay for lowpass gain
+        wd1: l1 weight decay for bandpass gain. If None, uses wd and l2.
+        lp_nl: nonlinearity to use for the lowpass. See
+          :py:class:`dtcwt_gainlayer.layers.nonlinear.WaveNonLinearity`.
+        bp_nl: nonlinearities to use for the bandpasses. See
+          :py:class:`dtcwt_gainlayer.layers.nonlinear.WaveNonLinearity`.
+        lp_nl_kwargs: keyword args for the lowpass nonlinearity
+        bp_nl_kwargs: keyword args for the lowpass nonlinearity
     """
-    def __init__(self, C, F, lp_size=3, bp_sizes=(1,), q=1.0,
-                 biort='near_sym_a', qshift='qshift_a',
-                 xfm=True, ifm=True):
+    def __init__(self, C, F, lp_size=3, bp_sizes=(1,), biort='near_sym_a',
+                 qshift='qshift_a', xfm=True, ifm=True, wd=0, wd1=None,
+                 lp_nl=None, bp_nl=None, lp_nl_kwargs={}, bp_nl_kwargs={}):
         super().__init__()
         self.C = C
         self.F = F
@@ -152,155 +172,42 @@ class WaveConvLayer(nn.Module):
         # that scale
         skip_hps = [True if s == 0 else False for s in bp_sizes]
         self.J = len(bp_sizes)
+        self.wd = wd
+        self.wd1 = wd1
 
         # The forward transform
         if xfm:
             self.XFM = DTCWTForward(
-                biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps)
+                biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps,
+                o_dim=2, ri_dim=-1)
         else:
             self.XFM = lambda x: x
 
-        # The nonlinearity
-        if 0.0 < q < 1.0:
-            self.shrink = SparsifyWaveCoeffs_std(self.J, F, q, 0.9)
-        elif q <= 0.0:
-            self.shrink = ReLUWaveCoeffs()
-        else:
-            self.shrink = lambda x: x
-
         # The mixing
-        self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes)
+        self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes, wd=wd, wd1=wd1)
+
+        # The nonlinearity
+        if not isinstance(bp_nl, (list, tuple)):
+            bp_nl = [bp_nl,] * self.J
+        self.NL = WaveNonLinearity(F, lp_nl, bp_nl, lp_nl_kwargs, bp_nl_kwargs)
 
         # The inverse
         if ifm:
-            self.IFM = DTCWTInverse(biort=biort, qshift=qshift)
+            self.IFM = DTCWTInverse(biort=biort, qshift=qshift, o_dim=2,
+                                    ri_dim=-1)
         else:
             self.IFM = lambda x: x
 
     def forward(self, x):
         u_lp, u = self.XFM(x)
         v_lp, v = self.GainLayer((u_lp, u))
-        u_lp2, u2 = self.shrink((v_lp, v))
+        u_lp2, u2 = self.NL((v_lp, v))
         y = self.IFM((u_lp2, u2))
         return y
 
     def init(self, gain=1, method='xavier_uniform'):
         self.GainLayer.init(gain, method)
 
-
-class ReLUWaveCoeffs(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        """ Bandpass input comes in as a tensor of shape (N, C, 6, H, W, 2).
-        Need to do the relu independently on real and imaginary parts """
-        yl, yh = x
-        yl = func.relu(yl)
-        yh = [func.relu(b) for b in yh]
-        return yl, yh
-
-
-class SparsifyWaveCoeffs_std(nn.Module):
-    r""" Sparsifies complex wavelet coefficients by shrinking their magnitude
-
-    Given a quantile value, shrinks the wavelet coefficients so that (1-q) are
-    non zero. E.g. if q = 0.9, only 10 percent of coefficients will remain.
-
-    Uses the rayleigh distribution to estimate what the threshold should be.
-
-    Args:
-        J (int): number of scales
-        C (int): number of channels
-        q (float): quantile value.
-        alpha (float): exponential moving average value. must be between 0 and 1
-    """
-    def __init__(self, J, C, q=0.5, alpha=.9, soft=True):
-        super().__init__()
-        assert alpha >= 0 and alpha <= 1
-        # Examine initial thresholds
-        self.J = J
-        self.C = C
-        self.alpha = alpha
-        # Keep track of the old value for the ema
-        self.ema = nn.Parameter(torch.zeros((J, C, 6)), requires_grad=False)
-        self.k = np.sqrt(-2 * np.log(1-q+1e-6))
-        #  self.k = k
-        self.soft = soft
-
-    @property
-    def threshs(self):
-        return self.k * self.ema
-
-    def constrain(self):
-        pass
-
-    def forward(self, x):
-        r""" Sparsify wavelet coefficients coming from DTCWTForward
-
-        Args:
-            x (tuple): tuple of yl, yh, where yh is a list/tuple of length J
-            representing the coefficients for scale1, scale2, ... scaleJ
-
-        Returns:
-            y (tuple): tuple of yl, yh, where yh is the shrunk wavelet
-            coefficients
-        """
-        yl, yh = x
-        assert len(yh) == self.J
-        yh2 = []
-
-        # For each scale, calculate max(r-t, 0)/r, as the 'gain' to be applied
-        # to each input.
-        for j in range(self.J):
-            if yh[j].shape == torch.Size([0]):
-                yh2.append(yh[j])
-            else:
-                r2 = torch.sum(yh[j]**2, dim=-1, keepdim=True)
-                r = torch.sqrt(r2)
-
-                # Calculate the std of each channel
-                sz = r.shape[0] * r.shape[3] * r.shape[4]
-                # If the real and imaginary parts both have variance 1,
-                # then the mean should be situated around sqrt(pi/2) = 1.25
-                mu = 1/sz * torch.sum(r.data, dim=(0,3,4,5))
-                m2 = 1/sz * torch.sum(r2.data, dim=(0,3,4,5))
-                # Similarly, the std should be sqrt((4-pi)/2) = .65
-                std = torch.sqrt(m2-mu**2)
-
-                # Update the estimate
-                # self.ema[j] = self.alpha * std + (1-self.alpha)*self.ema[j]
-                self.ema[j] = self.alpha * self.ema[j] + (1-self.alpha) * std
-
-                # Calculate the new threshold
-                thresh = self.ema[j] * self.k
-
-                # Review the threshold to match the size of yh:
-                # (N, C, 6, H, W, 2)
-                t = thresh.view(self.C, 6, 1, 1, 1)
-
-                if self.soft:
-                    yh2.append(_mag_shrink(yh[j], r, t))
-                else:
-                    yh2.append(_mag_shrink_hard(yh[j], r, t))
-
-        return yl, yh2
-
-
-def _mag_shrink_hard(x, r, t):
-    gain = (r >= t).float()
-
-    return x * gain
-
-
-def _mag_shrink(x, r, t):
-    # Calculate the numerator
-    r_new = func.relu(r - t)
-
-    # Add 1 to the denominator if the numerator will be 0
-    r1 = r + (r.data <= t).float()
-
-    return x * r_new/r1
 
 
 class WaveParamLayer(nn.Module):
