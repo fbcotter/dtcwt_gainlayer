@@ -12,7 +12,6 @@ import torch
 import sys
 import os
 from math import sqrt
-from torch.autograd import detect_anomaly
 
 import torch.nn.init as init
 
@@ -137,10 +136,9 @@ class BaseClass(Trainable):
             if torch.isnan(loss):
                 raise ValueError(
                     "Nan found in training at epoch {}".format(self.last_epoch))
-            for m in self.model.modules():
-                if hasattr(m, 'get_reg'):
-                    loss += m.get_reg()
+            loss += self.model.get_reg()
             loss.backward()
+            self.model.clip_grads()
             self.opt_step()
 
             corrects, bs = num_correct(output.data, target, topk=(1,5))

@@ -51,11 +51,7 @@ parser.add_argument('--cpu', action='store_true', help='Do not run on gpus')
 parser.add_argument('--num-gpus', type=float, default=0.5)
 parser.add_argument('--no-scheduler', action='store_true')
 parser.add_argument('--type', default=None, type=str, nargs='+',
-                    help='''Model type(s) to build. If left blank, will run 14
-networks consisting of those defined by the dictionary "nets" (0, 1, or 2
-invariant layers at different depths). Can also specify to run "nets1" or
-"nets2", which swaps out the invariant layers for other iterations.
-Alternatively can directly specify the layer name, e.g. "invA", or "invB2".''')
+                    help="Model type(s) to build")
 
 # Core hyperparameters
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -175,6 +171,16 @@ class MixedNet(nn.Module):
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*C2, self.num_classes)
 
+    def get_reg(self):
+        loss = 0
+        for name, m in self.net.named_children():
+            if name.startswith('gain'):
+                loss += m[0].GainLayer.get_reg()
+            elif name.startswith('conv'):
+                loss += 0.5 * self.wd * torch.sum(m[0].weight**2)
+        loss += 0.5 * self.wd * torch.sum(self.fc1.weight**2)
+        return loss
+
     def forward(self, x):
         """ Define the default forward pass"""
         out = self.net(x)
@@ -280,7 +286,7 @@ class TrainNET(BaseClass):
 
         self.optimizer, self.scheduler = optim.get_optim(
             'sgd', default_params, init_lr=lr,
-            steps=args.steps, wd=wd, gamma=0.2, momentum=mom,
+            steps=args.steps, wd=0, gamma=0.2, momentum=mom,
             max_epochs=args.epochs)
 
         if len(gain_params) > 0:

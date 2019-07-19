@@ -63,8 +63,6 @@ parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
 parser.add_argument('--opt1', default='sgd', type=str, help='gainlayer opt')
-parser.add_argument('-q', default=1, type=float,
-                    help='proportion of activations to keep')
 parser.add_argument('--pixel_nl', default='relu', type=str)
 parser.add_argument('--lp_nl', default='none', type=str)
 parser.add_argument('--bp_nl', default='none', type=str)
@@ -105,13 +103,14 @@ class MixedNet(nn.Module):
         PixelLayer = lambda C: nn.Sequential(
             nn.BatchNorm2d(C),
             nl(),
-            nn.MaxPool2d(2)
         )
 
         blks = [('wave1', WaveLayer(3, C)),
                 ('pixel1', PixelLayer(C)),
+                ('pool1', nn.MaxPool2d(2)),
                 ('wave2', WaveLayer(C, 2*C)),
                 ('pixel2', PixelLayer(2*C)),
+                ('pool2', nn.MaxPool2d(2)),
                 ('wave3', WaveLayer(2*C, 4*C)),
                 ('pixel3', PixelLayer(4*C))]
 
@@ -134,6 +133,25 @@ class MixedNet(nn.Module):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(8*C, self.num_classes)
+
+    def get_reg(self):
+        loss = self.net.wave1.GainLayer.get_reg()
+        loss += self.net.wave2.GainLayer.get_reg()
+        loss += self.net.wave3.GainLayer.get_reg()
+        if hasattr(self.net, 'conv_final'):
+            loss += 0.5 * self.wd * torch.sum(self.net.conv_final[0].weight**2)
+        loss += 0.5 * self.wd * torch.sum(self.fc1.weight**2)
+        return loss
+
+    def clip_grads(self, value=1):
+        grads = []
+        grads.extend([g for g in self.net.wave1.GainLayer.g])
+        grads.extend([g for g in self.net.wave2.GainLayer.g])
+        grads.extend([g for g in self.net.wave3.GainLayer.g])
+        # Set nans in grads to 0
+        for g in filter(lambda g: g.grad is not None, grads):
+            g.grad.data[g.grad.data != g.grad.data] = 0
+        torch.nn.utils.clip_grad_value_(grads, value)
 
     def forward(self, x):
         """ Define the default forward pass"""
@@ -249,7 +267,7 @@ class TrainNET(BaseClass):
 
         self.optimizer, self.scheduler = optim.get_optim(
             'sgd', default_params, init_lr=lr,
-            steps=args.steps, wd=wd, gamma=0.2, momentum=mom,
+            steps=args.steps, wd=0, gamma=0.2, momentum=mom,
             max_epochs=args.epochs)
 
         if len(gain_params) > 0:
@@ -372,15 +390,11 @@ if __name__ == "__main__":
             num_samples=(10 if args.nsamples == 0 else args.nsamples),
             checkpoint_at_end=True,
             config={
-                "args": args,
-                "dataset": args.dataset,
-                #  "dataset": tune.grid_search(['cifar100']),
+                "args": args, "dataset": args.dataset,
                 "lr": 0.5, "mom": 0.85, "wd": 1e-4, "wd1": 1e-5,
-                "lp_q": 0.8, "bp_q": 0.8,
+                "num_channels": 64,
                 "pixel_nl": tune.grid_search(['relu', 'none']),
-                "lp_nl": tune.grid_search(['none', 'relu', 'hardshrink_std',
-                                           'softshrink_std']),
-                "bp_nl": tune.grid_search(['none', 'relu', 'mag',
-                                           'hardshrink_std', 'softshrink_std']),
+                "lp_nl": tune.grid_search(['none', 'relu', 'relu2']),
+                "bp_nl": tune.grid_search(['none', 'relu', 'relu2']),
             },
             verbose=1)
