@@ -449,9 +449,9 @@ if __name__ == "__main__":
                 "type": tune.grid_search(type),
                 "lr": 0.5, "mom": 0.85, "wd": 1e-4, "wd1": 1e-5,
                 "num_channels": 64,
-                "pixel_nl": 'none',
-                "lp_nl": tune.grid_search(['softshrink', 'softshrink_std']),
-                "bp_nl": tune.grid_search(['none', 'relu', 'relu2',
-                                           'softshrink', 'softshrink_std', 'hardshrink_std'])
+                "pixel_nl": 'relu',
+                "lp_nl": tune.grid_search(['softshrink']),
+                "bp_nl": tune.grid_search(['none', 'relu',
+                                           'relu2', 'softshrink', ])
             },
             verbose=1)
