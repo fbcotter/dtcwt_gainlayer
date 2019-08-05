@@ -447,11 +447,13 @@ if __name__ == "__main__":
             config={
                 "args": args, "dataset": args.dataset,
                 "type": tune.grid_search(type),
-                "lr": 0.5, "mom": 0.85, "wd": 1e-4, "wd1": 1e-5,
+                "lr": 0.5, "mom": 0.85, "wd": 3e-4, "wd1": 1e-5,
                 "num_channels": 64,
-                "pixel_nl": 'relu',
-                "lp_nl": tune.grid_search(['softshrink']),
-                "bp_nl": tune.grid_search(['none', 'relu',
-                                           'relu2', 'softshrink', ])
+                #  "pixel_nl": 'none',
+                #  "lp_nl": 'relu',
+                #  "bp_nl": 'relu2',
+                "pixel_nl": tune.grid_search(['none', 'relu']),
+                "lp_nl": tune.grid_search(['none', 'relu', 'relu2', 'softshrink']),
+                "bp_nl": tune.grid_search(['none', 'relu', 'relu2', 'softshrink'])
             },
             verbose=1)
