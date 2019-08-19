@@ -65,11 +65,11 @@ parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
 parser.add_argument('--opt1', default='sgd', type=str, help='gainlayer opt')
-parser.add_argument('--pixel_nl', default='relu', type=str)
-parser.add_argument('--lp_nl', default='none', type=str)
-parser.add_argument('--bp_nl', default='none', type=str)
-parser.add_argument('--lp_q', default=0.8, type=float)
-parser.add_argument('--bp_q', default=0.8, type=float)
+parser.add_argument('--pixel-nl', default='relu', type=str)
+parser.add_argument('--lp-nl', default='none', type=str)
+parser.add_argument('--bp-nl', default='none', type=str)
+parser.add_argument('--lp-q', default=0.8, type=float)
+parser.add_argument('--bp-q', default=0.8, type=float)
 
 
 nets = {
@@ -110,13 +110,13 @@ class MixedNet(nn.Module):
             lp_nl_kwargs=lp_nl_kwargs, bp_nl_kwargs=bp_nl_kwargs)
 
         if pixel_nl == 'relu':
-            nl = nn.ReLU
+            σ_pixel = lambda C: nn.Sequential(
+                nn.BatchNorm2d(C),
+                nn.ReLU())
+        elif pixel_nl == 'none' and lp_nl == 'relu2':
+            σ_pixel = lambda C: PassThrough()
         else:
-            nl = PassThrough
-        PixelLayer = lambda C: nn.Sequential(
-            nn.BatchNorm2d(C),
-            nl(),
-        )
+            σ_pixel = lambda C: nn.BatchNorm2d(C)
 
         layers = nets[type]
         blks = []
@@ -139,7 +139,7 @@ class MixedNet(nn.Module):
                 layer += 1
             elif blk == 'gain':
                 name = 'wave' + chr(ord('A') + layer)
-                blk = nn.Sequential(WaveLayer(C1, C2), PixelLayer(C2))
+                blk = nn.Sequential(WaveLayer(C1, C2), σ_pixel(C2))
                 C1 = C2
                 layer += 1
             elif blk == 'pool':
@@ -222,6 +222,7 @@ class TrainNET(BaseClass):
         wd = config.get('wd', args.wd)
         C = config.get('num_channels', args.C)
         dataset = config.get('dataset', args.dataset)
+        num_gpus = config.get('num_gpus', args.num_gpus)
 
         # Get optimizer parameters for gainlayer
         mom1 = config.get('mom1', args.mom1)
@@ -254,16 +255,18 @@ class TrainNET(BaseClass):
             num_workers = 0
             if self.use_cuda:
                 torch.cuda.manual_seed(args.seed)
+        else:
+            args.seed = random.randint(0, 10000)
 
         # ######################################################################
         #  Data
         kwargs = {'num_workers': num_workers, 'pin_memory': True} if self.use_cuda else {}
-        if args.dataset.startswith('cifar'):
+        if dataset.startswith('cifar'):
             self.train_loader, self.test_loader = cifar.get_data(
                 32, args.datadir, dataset=dataset,
                 batch_size=args.batch_size, trainsize=args.trainsize,
                 **kwargs)
-        elif args.dataset == 'tiny_imagenet':
+        elif dataset == 'tiny_imagenet':
             self.train_loader, self.test_loader = tiny_imagenet.get_data(
                 64, args.datadir, val_only=False,
                 batch_size=args.batch_size, trainsize=args.trainsize,
@@ -274,7 +277,7 @@ class TrainNET(BaseClass):
         # hyperparameters found by cross validation.
 
         # Build the network
-        self.model = MixedNet(args.dataset, type, C, wd, wd1,
+        self.model = MixedNet(dataset, type, C, wd, wd1,
                               pixel_nl=pixel_nl, lp_nl=lp_nl, bp_nl=bp_nl,
                               lp_nl_kwargs=dict(q=lp_q, thresh=lp_thresh),
                               bp_nl_kwargs=dict(q=bp_q, thresh=bp_thresh))
@@ -282,7 +285,7 @@ class TrainNET(BaseClass):
         self.model.apply(init)
 
         # Split across GPUs
-        if torch.cuda.device_count() > 1 and config.get('num_gpus', 0) > 1:
+        if torch.cuda.device_count() > 1 and num_gpus > 1:
             self.model = nn.DataParallel(self.model)
             model = self.model.module
         else:

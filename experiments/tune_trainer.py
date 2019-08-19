@@ -17,6 +17,7 @@ import torch.nn.init as init
 
 
 def net_init(m, gain=1):
+    """ Function to initialize the networks. Needed by all experiments """
     classname = m.__class__.__name__
     if (classname.find('Conv') == 0) or (classname.find('Linear') == 0):
         init.xavier_uniform_(m.weight, gain=sqrt(2))
@@ -125,7 +126,6 @@ class BaseClass(Trainable):
         update_steps = np.linspace(
             int(1/4 * num_iter), num_iter-1, 4).astype('int')
 
-        #  with detect_anomaly():
         for batch_idx, (data, target) in enumerate(self.train_loader):
             if self.use_cuda:
                 data, target = data.cuda(), target.cuda()

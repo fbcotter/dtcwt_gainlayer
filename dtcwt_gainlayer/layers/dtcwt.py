@@ -199,10 +199,10 @@ class WaveConvLayer(nn.Module):
             self.IFM = lambda x: x
 
     def forward(self, x):
-        u_lp, u = self.XFM(x)
-        v_lp, v = self.GainLayer((u_lp, u))
-        u_lp2, u2 = self.NL((v_lp, v))
-        y = self.IFM((u_lp2, u2))
+        lp, bp = self.XFM(x)
+        lp, bp = self.GainLayer((lp, bp))
+        lp, bp = self.NL((lp, bp))
+        y = self.IFM((lp, bp))
         return y
 
     def init(self, gain=1, method='xavier_uniform'):
