@@ -82,7 +82,7 @@ class WaveGainLayer(nn.Module):
                 bps.append(nn.Parameter(torch.tensor([]), requires_grad=False))
             else:
                 self.bp_pad.append((s - 1) // 2)
-                bps.append(nn.Parameter(torch.randn(6, 2, F, C, s, s)))
+                bps.append(nn.Parameter(torch.randn(6, F, C, s, s, 2)))
         self.g = nn.ParameterList(bps)
         self.init()
 
@@ -123,7 +123,7 @@ class WaveGainLayer(nn.Module):
                 bands = []
                 for l in range(6):
                     u_jl_real, u_jl_imag = u_j[:,:,l,:,:,0], u_j[:,:,l,:,:,1]
-                    g_jl_real, g_jl_imag = g_j[l, 0], g_j[l, 1]
+                    g_jl_real, g_jl_imag = g_j[l, ..., 0], g_j[l, ..., 1]
                     # real output = r*r - i*i
                     v_jl_real = (func.conv2d(u_jl_real, g_jl_real, padding=pad)
                                - func.conv2d(u_jl_imag, g_jl_imag, padding=pad)) # noqa
@@ -169,7 +169,7 @@ class WaveGainLayer(nn.Module):
             g_j = self.g[j]
             if not (g_j is None or g_j.shape == torch.Size([0])):
                 s = g_j.shape
-                fan_in, fan_out = s[3]*s[4]*s[5], s[2]*s[4]*s[5]
+                fan_in, fan_out = s[2]*s[3]*s[4], s[1]*s[3]*s[4]
                 std = bp_scales[j] * math.sqrt(2.0 / (fan_in + fan_out))
                 a = math.sqrt(3.0) * std
                 with torch.no_grad():

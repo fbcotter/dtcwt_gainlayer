@@ -16,7 +16,8 @@ import random
 from collections import OrderedDict
 from dtcwt_gainlayer.data import cifar, tiny_imagenet
 from dtcwt_gainlayer import optim
-from tune_trainer import BaseClass, get_hms, net_init
+from tune_trainer import BaseClass, net_init
+from utils import get_hms
 from tensorboardX import SummaryWriter
 import py3nvml
 from math import ceil

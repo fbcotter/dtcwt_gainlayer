@@ -1,37 +1,39 @@
-"""
-This module creates a Ray Tune training class. In particular, it makes
-scaffolding for running single epochs of training, testing, saving and loading
-models. The Trainable class is then used in the experiment code with the
-schedulers, but it can also be used without the scheduler.
-"""
-from ray.tune import Trainable
-import time
-import torch.nn.functional as func
-import numpy as np
 import torch
+import time
+import random
+import torch.nn.functional as func
+import torch.nn as nn
+from dtcwt_gainlayer.data import cifar, tiny_imagenet
+import numpy as np
 import sys
 import os
-from math import sqrt
-from utils import num_correct
-
-import torch.nn.init as init
 
 
-def net_init(m, gain=1):
-    """ Function to initialize the networks. Needed by all experiments """
-    classname = m.__class__.__name__
-    if (classname.find('Conv') == 0) or (classname.find('Linear') == 0):
-        init.xavier_uniform_(m.weight, gain=sqrt(2))
-        try:
-            init.constant_(m.bias, 0)
-        # Can get an attribute error if no bias to learn
-        except AttributeError:
-            pass
-    elif hasattr(m, 'init'):
-        m.init(gain)
+def get_hms(seconds):
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+
+    return h, m, s
 
 
-class BaseClass(Trainable):
+def num_correct(output, target, topk=(1,)):
+    """Computes the precision@k for the specified values of k"""
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+        res = []
+        for k in topk:
+            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            res.append(correct_k)
+        return res, batch_size
+
+
+class TrainingObject(object):
     """ This class handles model training and scheduling for our networks.
 
     The config dictionary setup in the main function defines how to build the
@@ -49,12 +51,55 @@ class BaseClass(Trainable):
         - wd (optional): the weight decay
         - std (optional): the initialization variance
     """
-    def _setup(self, config):
-        raise NotImplementedError("Please overwrite the _setup method")
+    def __init__(self, model, dataset, datadir, optim, scheduler, optim2=None,
+                 scheduler2=None, batch_size=128, seed=None, num_gpus=1,
+                 verbose=False):
+        # Parameters like learning rate and momentum can be speicified by the
+        # config search space. If not specified, fall back to the args
+        self.dataset = dataset
+        self.datadir = datadir
+        self.num_gpus = num_gpus
+        self.verbose = verbose
+        self.model = model
+        self.optimizer = optim
+        self.scheduler = scheduler
+        self.optimizer2 = optim2
+        self.scheduler2 = scheduler2
 
-    @property
-    def verbose(self):
-        return getattr(self, '_verbose', False)
+        num_workers = 4
+        if seed is not None:
+            np.random.seed(seed)
+            random.seed(seed)
+            torch.manual_seed(seed)
+            num_workers = 0
+            if self.use_cuda:
+                torch.cuda.manual_seed(seed)
+        else:
+            seed = random.randint(0, 10000)
+
+        # ######################################################################
+        #  Data
+        kwargs = {}
+        if self.use_cuda:
+            kwargs = {'num_workers': num_workers, 'pin_memory': True}
+        if dataset.startswith('cifar'):
+            self.train_loader, self.test_loader = cifar.get_data(
+                32, datadir, dataset=dataset,
+                batch_size=batch_size, **kwargs)
+        elif dataset == 'tiny_imagenet':
+            self.train_loader, self.test_loader = tiny_imagenet.get_data(
+                64, datadir, val_only=False,
+                batch_size=batch_size, **kwargs)
+
+        # ######################################################################
+        # Split across GPUs
+        if torch.cuda.device_count() > 1 and num_gpus > 1:
+            self.model = nn.DataParallel(self.model)
+            model = self.model.module
+        else:
+            model = self.model
+        if self.use_cuda:
+            self.model.cuda()
 
     @property
     def use_cuda(self):
@@ -75,18 +120,18 @@ class BaseClass(Trainable):
 
     def step_lr(self):
         self.scheduler.step()
-        if hasattr(self, 'scheduler1'):
-            self.scheduler1.step()
+        if self.scheduler2 is not None:
+            self.scheduler2.step()
 
     def zero_grad(self):
         self.optimizer.zero_grad()
-        if hasattr(self, 'optimizer1'):
-            self.optimizer1.zero_grad()
+        if self.optimizer2 is not None:
+            self.optimizer2.zero_grad()
 
     def opt_step(self):
         self.optimizer.step()
-        if hasattr(self, 'optimizer1'):
-            self.optimizer1.step()
+        if self.optimizer2 is not None:
+            self.optimizer2.step()
 
     def _train_iteration(self):
         self.model.train()
@@ -200,18 +245,18 @@ class BaseClass(Trainable):
         model = self.model.state_dict()
         opt = self.optimizer.state_dict()
         sch = self.scheduler.state_dict()
-        opt1 = None
-        sch1 = None
-        if hasattr(self, 'optimizer1'):
-            opt1 = self.optimizer1.state_dict()
-        if hasattr(self, 'scheduler1'):
-            sch1 = self.scheduler1.state_dict()
+        opt2 = None
+        sch2 = None
+        if self.optimizer2 is not None:
+            opt2 = self.optimizer2.state_dict()
+        if self.scheduler2 is not None:
+            sch2 = self.scheduler2.state_dict()
         torch.save({
             'model_state_dict': model,
             'optimizer_state_dict': opt,
             'scheduler_state_dict': sch,
-            'optimizer1_state_dict': opt1,
-            'scheduler1_state_dict': sch1,
+            'optimizer2_state_dict': opt2,
+            'scheduler2_state_dict': sch2,
         }, checkpoint_path)
 
         return checkpoint_path
@@ -224,18 +269,18 @@ class BaseClass(Trainable):
         if 'scheduler_state_dict' in chk.keys():
             self.scheduler.load_state_dict(chk['scheduler_state_dict'])
 
-        if 'optimizer1_state_dict' in chk.keys() and \
-                chk['optimizer1_state_dict'] is not None:
-            if not hasattr(self, 'optimizer1'):
+        if 'optimizer2_state_dict' in chk.keys() and \
+                chk['optimizer2_state_dict'] is not None:
+            if self.optimizer2 is None:
                 raise ValueError('Loading from a checkpoint with a second '
                                  'optimizer, but we dont have one')
             else:
-                self.optimizer1.load_state_dict(chk['optimizer1_state_dict'])
+                self.optimizer2.load_state_dict(chk['optimizer2_state_dict'])
 
-        if 'scheduler1_state_dict' in chk.keys() and \
-                chk['scheduler1_state_dict'] is not None:
-            if not hasattr(self, 'scheduler1'):
+        if 'scheduler2_state_dict' in chk.keys() and \
+                chk['scheduler2_state_dict'] is not None:
+            if self.scheduler2 is None:
                 raise ValueError('Loading from a checkpoint with a second '
                                  'scheduler, but we dont have one')
             else:
-                self.scheduler1.load_state_dict(chk['scheduler1_state_dict'])
+                self.scheduler2.load_state_dict(chk['scheduler2_state_dict'])
