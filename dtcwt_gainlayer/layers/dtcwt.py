@@ -3,31 +3,57 @@ import torch.nn as nn
 import torch.nn.functional as func
 import math
 import numpy as np
+import pytorch_wavelets
 from pytorch_wavelets import DTCWTForward, DTCWTInverse
 from dtcwt_gainlayer.layers.nonlinear import WaveNonLinearity
+from torch.autograd import Function
+
+
+class ComplexL1(Function):
+    r""" Applies complex L1 regularization. Whenever the input is zero, sets the
+    gradient to be 0 """
+    @staticmethod
+    def forward(ctx, z):
+        mag = torch.sqrt(z[...,0]**2 + z[...,1]**2)
+        phase = torch.atan2(z[...,1], z[...,0])
+        # Mark the locations where the input was zero with nans
+        phase[(z[...,0] == 0) & (z[...,1] == 0)] = torch.tensor(np.nan)
+        ctx.save_for_backward(phase)
+        return torch.sum(mag)
+
+    @staticmethod
+    def backward(ctx, dy):
+        phase, = ctx.saved_tensors
+        dz = torch.stack((dy*torch.cos(phase), dy*torch.sin(phase)), dim=-1)
+        # Wherever we have nans in the output (nans have the unique property
+        # that they never equal each other), set the gradient to 0.
+        dz[dz != dz] = 0
+        return dz
 
 
 class WaveGainLayer(nn.Module):
-    """ Create gains and apply them to each orientation independently
+    """ Create wavelet gains and apply them to each orientation independently
 
-    Inputs:
-        C: Number of input channels
-        F: number of output channels
-        lp_size: Spatial size of lowpass filter
-        bp_sizes: Spatial size of bandpass filters
-        wd: l2 weight decay for lowpass gain
-        wd1: l1 weight decay for bandpass gain. If None, uses wd and l2.
+    Args:
+        C (int): Number of input channels
+        F (int): number of output channels
+        lp_size (int): Spatial size of lowpass filter
+        bp_sizes (tuple(int)): Spatial size of bandpass filters. The length of
+            the tuple indicates the number of scales we want to use. Can have
+            zeros in the tuple to not do processing at that scale.
+        wd (float): l2 weight decay for lowpass gain
+        wd1 (float, optional): l1 weight decay for bandpass gains. If None, uses
+            wd and l2.
 
+    Attributes:
+        J (int): lenght of bp_sizes tuple
+        g_lp (torch.Tensor): Learnable lowpass gain
+        g (:class:`~torch.nn.ParameterList`): Tuple of complex bandpass gains
 
-    The forward pass should be provided with a tuple of wavelet coefficients.
-    The tuple should have length 2 and be the lowpass and bandpass coefficients.
-    The lowpass coefficients should have shape (N, C, H, W).
-    The bandpass coefficients should also be a tuple/list and have length J.
-    Each entry in the bandpass list should have 6 dimensions, and should be of
-    shape (N, C, 6, H', W', 2).
-
-    Returns a tuple of tensors of the same form as the input, but with F output
-    channels.
+    Note:
+        We recommend you use the class' init method to initialize the gains, as
+        the complex weights are 6-D tensors, and the in-built glorot
+        initialization will incorrectly estimate the fan in and fan out.
     """
     def __init__(self, C, F, lp_size=3, bp_sizes=(1,), lp_stride=1,
                  bp_strides=(1,), wd=0, wd1=None):
@@ -61,6 +87,20 @@ class WaveGainLayer(nn.Module):
         self.init()
 
     def forward(self, coeffs):
+        r""" Applies the wavelet gains to the provided coefficients.
+
+        Args:
+            coeffs (tuple): tuple of (lowpass, bandpass) coefficients, where
+                the bandpass coefficients is also a tuple of length J. This is
+                the default return style from
+                :class:`pytorch_wavelets.dtcwt.transform2d.DTCWTForward`, so
+                you can easily connect the output of the DTCWT to the gain
+                layer.
+
+        Returns:
+            coeffs (tuple): tuple of (lowpass, bandpass) coefficients in same
+                form as input but with the channels mixed.
+        """
         # Pull out the lowpass and the bandpass coefficients
         u_lp, u = coeffs
         assert len(u) == len(self.g), "Number of bandpasses must " + \
@@ -96,9 +136,23 @@ class WaveGainLayer(nn.Module):
 
         return v_lp, v
 
-    def init(self, gain=1, method='xavier_uniform'):
+    def init(self, gain=1):
+        r""" Initializes the gain layer to follow the xavier uniform method
+
+        Args:
+            gain (float): Xavier/Glorot gain a.
+
+        Have to calculate the fan in and fan out directly from the tensors. Then
+        sets the gains to be randomly drawn from a uniform:
+
+        .. math::
+
+            g \sim U\left[-g \sqrt{ \frac{6}{fan\_in + fan\_out} },\
+                 g \sqrt{\frac{6}{fan\_in+fan\_out}} \right]
+
+        where g is the provided gain
+        """
         lp_scales = np.array([1, 2, 4, 8]) * gain
-        #  bp_scales = np.array([1, 2, 4, 8]) * gain
         bp_scales = np.array([2, 4, 8, 16]) * gain
 
         # Calculate the fan in and fan out manually - the gain are in odd shapes
@@ -122,10 +176,15 @@ class WaveGainLayer(nn.Module):
                     g_j.uniform_(-a, a)
 
     def get_reg(self):
+        r""" Returns regularization function applied to the lowpass and bandpass
+        gains
+
+        Returned value is differentiable, so can call .backward() on it.
+        """
         a = self.wd*0.5*torch.sum(self.g_lp**2)
         if self.wd1 is not None:
             for g in self.g:
-                a += self.wd1 * torch.sum(torch.sqrt(g[:,0]**2 + g[:,1]**2))
+                a += self.wd1 * ComplexL1.apply(g)
         else:
             for g in self.g:
                 a += 0.5 * self.wd * torch.sum(g**2)
@@ -137,28 +196,38 @@ class WaveGainLayer(nn.Module):
 
 
 class WaveConvLayer(nn.Module):
-    """ Decomposes a signal into a DTCWT pyramid and learns weights for each
-    scale.
+    r""" Takes the input into the DTCWT domain before learning complex mixing
+    gains and optionally applying a nonliearity.
 
-    This type takes a forward DTCWT of a signal and then learns convolutional
-    kernels in each layer, before taking an Inverse DTCWT. The number of scales
-    taken in the pyramid decomposition will be the length of the input bp_sizes.
-    You can not learn parameters for a layer by setting the kernel size to 0.
+    This is a convenience class that combines the
+    :class:`dtcwt_gainlayer.WaveGainLayer`,
+    :class:`pytorch_wavelets.DTCWTForward`,
+    :class:`pytorch_wavelets.DTCWTInverse`,
+    and :class:`dtcwt_gainlayer.WaveNonLinearity` classes.
+    Can build your own class to combine these individually for more flexibility
+    (e.g. if you did not want to use the Inverse DTCWT after the nonlinearity).
 
-    Inputs:
-        C: Number of input channels
-        F: number of output channels
-        lp_size: Spatial size of lowpass filter
-        bp_sizes: Spatial size of bandpass filters
-        q: the proportion of actiavtions to keep
+    Args:
+        C (int): Number of input channels. See
+            :class:`~dtcwt_gainlayer.WaveGainLayer`.
+        F (int): number of output channels. See
+            :class:`~dtcwt_gainlayer.WaveGainLayer`.
+        lp_size: Spatial size of lowpass filter. See
+            :class:`~dtcwt_gainlayer.WaveGainLayer`.
+        bp_sizes: Spatial size of bandpass filters. See
+            :class:`~dtcwt_gainlayer.WaveGainLayer`.
+        biort: Biorthogonal filters to use for the DTCWT and inverse DTCWT.
+        qshift: Quarter shift filters to use for the DTCWT and inverse DTCWT.
         xfm: true indicating should take dtcwt of input, false to skip
         ifm: true indicating should take inverse dtcwt of output, false to skip
-        wd: l2 weight decay for lowpass gain
-        wd1: l1 weight decay for bandpass gain. If None, uses wd and l2.
+        wd: l2 weight decay for lowpass gain. See
+            :class:`~dtcwt_gainlayer.WaveGainLayer`.
+        wd1: l1 weight decay for bandpass gain. If None, uses wd and l2. See
+            :class:`~dtcwt_gainlayer.WaveGainLayer`.
         lp_nl: nonlinearity to use for the lowpass. See
-          :py:class:`dtcwt_gainlayer.layers.nonlinear.WaveNonLinearity`.
+            :class:`~dtcwt_gainlayer.WaveNonLinearity`.
         bp_nl: nonlinearities to use for the bandpasses. See
-          :py:class:`dtcwt_gainlayer.layers.nonlinear.WaveNonLinearity`.
+            :class:`~dtcwt_gainlayer.WaveNonLinearity`.
         lp_nl_kwargs: keyword args for the lowpass nonlinearity
         bp_nl_kwargs: keyword args for the lowpass nonlinearity
     """
@@ -175,7 +244,6 @@ class WaveConvLayer(nn.Module):
         self.wd = wd
         self.wd1 = wd1
 
-        # The forward transform
         if xfm:
             self.XFM = DTCWTForward(
                 biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps,
@@ -183,15 +251,12 @@ class WaveConvLayer(nn.Module):
         else:
             self.XFM = lambda x: x
 
-        # The mixing
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes, wd=wd, wd1=wd1)
 
-        # The nonlinearity
         if not isinstance(bp_nl, (list, tuple)):
             bp_nl = [bp_nl,] * self.J
         self.NL = WaveNonLinearity(F, lp_nl, bp_nl, lp_nl_kwargs, bp_nl_kwargs)
 
-        # The inverse
         if ifm:
             self.IFM = DTCWTInverse(biort=biort, qshift=qshift, o_dim=2,
                                     ri_dim=-1)
@@ -199,25 +264,54 @@ class WaveConvLayer(nn.Module):
             self.IFM = lambda x: x
 
     def forward(self, x):
-        lp, bp = self.XFM(x)
-        lp, bp = self.GainLayer((lp, bp))
-        lp, bp = self.NL((lp, bp))
-        y = self.IFM((lp, bp))
+        """ Applies the wavelet gain layer to the provided coefficients.
+
+        Args:
+            x: If xfm is true, x should be a pixel representation of an input.
+               If it is false, it should be tuple of (lowpass, bandpass)
+               coefficients, where the bandpass coefficients is also a tuple of
+               length J.
+
+        Returns:
+            y: If ifm is true, y will be in the pixel domain. If false, will be
+                a tuple of (lowpass, bandpass) coefficients.
+        """
+        y = self.XFM(x)
+        y = self.GainLayer(y)
+        y = self.NL(y)
+        y = self.IFM(y)
         return y
 
     def init(self, gain=1, method='xavier_uniform'):
+        """ Initializes the Gain layer weights
+        """
         self.GainLayer.init(gain, method)
 
+    def get_reg(self):
+        """ Returns regularization function applied to the gain layer """
+        return self.Gainlayer.get_reg()
 
 
 class WaveParamLayer(nn.Module):
-    """ Parameterizes gains in the DTCWT domain
+    r""" Parameterizes gains in the DTCWT domain before doing convolution in the
+    spatial domain.
 
-    Inputs:
+    Currently only supports convolutional kernels with size 4, or 8. For an
+    8x8 kernel, can specify to use only the lower frequency regions. Also, only
+    uses the coarsest scale bandpass coefficients. I.e. if J=3, will not learn
+    scale 1 and 2 coefficients, but scale 3 and the lowpass.
+
+    Args:
         C: Number of input channels
         F: number of output channels
-        k: a power of 2
-        J: an integer
+        k: kernel size
+        J: number of scales
+        wd: l2 weight decay to use for lowpass weights
+        wd1: l1 weight decay to use for bandpass gains. If None, will use l2
+            weight decay and the wd term.
+        right: As the convolutional kernels are even, this flag shifts the
+            output by 1 pixel to the right (and down), and if it is off, the
+            output is shifted one pixel to the left (and up).
     """
     def __init__(self, C, F, k=4, stride=1, J=1, wd=0, wd1=None, right=True):
         super().__init__()
@@ -226,99 +320,97 @@ class WaveParamLayer(nn.Module):
             self.wd1 = wd
         else:
             self.wd1 = wd1
+        self.k = k
         self.C = C
         self.F = F
-        x = torch.zeros(F, C, k, k)
-        torch.nn.init.xavier_uniform_(x)
-        xfm = DTCWTForward(J=J)
-        self.ifm = DTCWTInverse()
-        yl, yh = xfm(x)
         self.J = J
-        if k == 4 and J == 1:
-            self.downsample = True
-            yl = func.avg_pool2d(yl, 2)
-            self.gl = nn.Parameter(torch.zeros_like(yl))
-            self.gh = nn.Parameter(torch.zeros_like(yh[0]))
-            self.gl.data = yl.data
-            self.gh.data = yh[0].data
-            if right:
+        self.right = right
+        self.ifm = DTCWTInverse()
+        self._init()
+
+    def _init(self):
+        # To get the right coeff sizes, perform a forward dtcwt on a kernel size
+        # you ultimately want after reconstruction.
+        x = torch.zeros(self.F, self.C, self.k, self.k)
+        torch.nn.init.xavier_uniform_(x)
+        xfm = DTCWTForward(J=self.J)
+        yl, yh = xfm(x)
+        self.downsample = False
+
+        if self.k == 4:
+            if self.J == 1:
+                self.downsample = True
+                yl = func.avg_pool2d(yl, 2)
+            self.u_lp = nn.Parameter(torch.zeros_like(yl))
+            self.uj = nn.Parameter(torch.zeros_like(yh[-1]))
+            self.u_lp.data = yl.data
+            self.uj.data = yh[-1].data
+            if self.right:
                 self.pad = (1, 2, 1, 2)
             else:
                 self.pad = (2, 1, 2, 1)
-        elif k == 4 and J == 2:
-            self.downsample = False
-            self.gl = nn.Parameter(torch.zeros_like(yl))
-            self.gh = nn.Parameter(torch.zeros_like(yh[0]))
-            self.gl.data = yl.data
-            self.gh.data = yh[1].data
-            if right:
-                self.pad = (1, 2, 1, 2)
-            else:
-                self.pad = (2, 1, 2, 1)
-        elif k == 8 and J == 1:
-            self.downsample = True
-            yl = func.avg_pool2d(yl, 2)
-            self.gl = nn.Parameter(torch.zeros_like(yl))
-            self.gh = nn.Parameter(torch.zeros_like(yh[0]))
-            self.gl.data = yl.data
-            self.gh.data = yh[0].data
-            if right:
-                self.pad = (3, 4, 3, 4)
-            else:
-                self.pad = (4, 3, 4, 3)
-        elif k == 8 and J == 2:
-            self.downsample = False
-            self.gl = nn.Parameter(torch.zeros_like(yl))
-            #  self.gh = nn.Parameter(torch.zeros_like(yh[0]))
-            self.gh = nn.Parameter(torch.zeros_like(yh[1]))
-            self.gl.data = yl.data
-            self.gh.data = yh[1].data
-            #  self.gh1.data = yh[1].data
-            if right:
-                self.pad = (3, 4, 3, 4)
-            else:
-                self.pad = (4, 3, 4, 3)
-        elif k == 8 and J == 3:
-            self.downsample = False
-            self.gl = nn.Parameter(torch.zeros_like(yl))
-            #  self.gh = nn.Parameter(torch.zeros_like(yh[0]))
-            self.gh = nn.Parameter(torch.zeros_like(yh[2]))
-            self.gl.data = yl.data
-            self.gh.data = yh[2].data
-            #  self.gh1.data = yh[1].data
-            if right:
+        elif self.k == 8:
+            if self.J == 1:
+                self.downsample = True
+                yl = func.avg_pool2d(yl, 2)
+            self.u_lp = nn.Parameter(torch.zeros_like(yl))
+            self.uj = nn.Parameter(torch.zeros_like(yh[-1]))
+            self.u_lp.data = yl.data
+            self.uj.data = yh[-1].data
+            if self.right:
                 self.pad = (3, 4, 3, 4)
             else:
                 self.pad = (4, 3, 4, 3)
         else:
             raise NotImplementedError
+        return yl, yh
 
-    def forward(self, x):
+    @property
+    def filt(self):
+        """ Gets the spatial domain representation of the filter.
+
+        Inverts the learned gains from DTCWT coefficients to wavelet coeffs
+        """
         if self.downsample:
-            gl = func.interpolate(self.gl, scale_factor=2, mode='bilinear',
-                                  align_corners=False)
+            u_lp = func.interpolate(self.u_lp, scale_factor=2, mode='bilinear',
+                                    align_corners=False)
         else:
-            gl = self.gl
+            u_lp = self.u_lp
 
         if self.J == 1:
-            h = self.ifm((gl, (self.gh,)))
+            h = self.ifm((u_lp, (self.uj,)))
         elif self.J == 2:
-            h = self.ifm((gl, (None, self.gh)))
+            h = self.ifm((u_lp, (None, self.uj)))
         elif self.J == 3:
-            h = self.ifm((gl, (None, None, self.gh)))
+            h = self.ifm((u_lp, (None, None, self.uj)))
+        return h
+
+    def forward(self, x):
+        """ Convolves an input by the reconstructed kernel. Does the inverse
+        DTCWT on the weights and then applies the convolutional kernel in the
+        spatial domain.
+        """
         x = torch.nn.functional.pad(x, self.pad)
-        y = func.conv2d(x, h)
+        y = func.conv2d(x, self.h)
         return y
 
     def get_reg(self):
-        a = self.wd*0.5*torch.sum(self.gl**2)
-        a += self.wd1*torch.sum(torch.abs(self.gh))
-        #  if hasattr(self, 'gh1'):
-            #  a += self.wd1*torch.sum(torch.abs(self.gh1))
+        """ Returns regularization function applied to the lowpass and bandpass
+        gains
+
+        Returned value is differentiable, so can call .backward() on it.
+        """
+        a = self.wd*0.5*torch.sum(self.u_lp**2)
+        if self.wd1 is not None:
+            for g in self.g:
+                a += self.wd1 * ComplexL1.apply(g)
+        else:
+            for g in self.g:
+                a += 0.5 * self.wd * torch.sum(g**2)
         return a
 
     def extra_repr(self):
-        return '(gl): Parameter of type {} with size: {}\n' \
-               '(gh): Parameter of type {} with size: {}'.format(
-                   self.gl.type(), 'x'.join([str(x) for x in self.gl.shape]),
-                   self.gh.type(), 'x'.join([str(x) for x in self.gh.shape]))
+        return '(u_lp): Parameter of type {} with size: {}\n' \
+               '(uj): Parameter of type {} with size: {}'.format(
+                   self.u_lp.type(), 'x'.join([str(x) for x in self.u_lp.shape]),
+                   self.uj.type(), 'x'.join([str(x) for x in self.uj.shape]))

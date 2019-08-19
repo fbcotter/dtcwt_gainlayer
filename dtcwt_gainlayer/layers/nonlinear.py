@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as func
-from .shrink import SparsifyWaveCoeffs_std, mag, SoftShrink
+from dtcwt_gainlayer.layers.shrink import SparsifyWaveCoeffs_std, mag, SoftShrink
 
 
 class PassThrough(nn.Module):
@@ -10,7 +10,50 @@ class PassThrough(nn.Module):
 
 
 class WaveNonLinearity(nn.Module):
-    def __init__(self, C, lp=None, bp=(None,), lpkwargs={}, bpkwargs={}):
+    """ Performs a wavelet-based nonlinearity.
+
+    Args:
+        C (int): Number of input channels. Some of the nonlinearities have batch
+            norm, so need to know this.
+        lp (str): Nonlinearity to use for the lowpass coefficients
+        bp (list(str)): Nonlinearity to use for the bandpass coefficients.
+        lp_q (float): Quantile value for sparsity threshold for lowpass.
+            1 keeps all coefficients and 0 keeps none. Only valid if lp is
+            'softshrink_std' or 'hardshrink_std'. See
+            :class:`SparsifyWaveCoeffs_std`.
+        bp_q (float): Quantile value for sparsity threshold for bandpass
+            coefficients. Only valid if bp is 'softshrink_std' or
+            'hardshrink_std'.
+
+    The options for the lowpass are:
+
+    - none
+    - relu (as you'd expect)
+    - relu2 - applies batch norm + relu
+    - softshrink - applies soft shrinkage with a learnable threshold
+    - hardshrink_std - applies hard shrinkage. The 'std' implies that it
+      tracks the standard deviation of the activations, and sets a threshold
+      attempting to reach a desired sparsity level. This assumes that the
+      lowpass coefficients follow a laplacian distribution. See
+      :class:`dtcwt_gainlayer.layers.shrink.SparsifyWaveCoeffs_std`.
+    - softshrink_std - same as hardshrink std except uses soft shrinkage.
+
+    The options for the bandpass are:
+
+    - none
+    - relu (applied indepently to the real and imaginary components)
+    - relu2 - applies batch norm + relu to the magnitude of the bandpass
+      coefficients
+    - softshrink - applies shoft shrinkage to the magnitude of the bp
+      coefficietns with a learnable threshold
+    - hardshrink_std - applies hard shrinkage by tracking the standard
+      deviation. Assumes the bp distributions follow an exponential
+      distribution. See
+      :class:`dtcwt_gainlayer.layers.shrink.SparsifyWaveCoeffs_std`.
+    - softshrink_std - same as hardshrink_std but with soft shrinkage.
+
+    """
+    def __init__(self, C, lp=None, bp=(None,), lp_q=0.8, bp_q=0.8):
         super().__init__()
         if lp is None or lp == 'none':
             self.lp = PassThrough()
@@ -18,19 +61,12 @@ class WaveNonLinearity(nn.Module):
             self.lp = nn.ReLU()
         elif lp == 'relu2':
             self.lp = BNReLUWaveCoeffs(C, bp=False)
-        elif lp == 'hardshrink':
-            thresh = lpkwargs.get('thresh', 1)
-            self.lp = nn.Hardshrink(thresh)
         elif lp == 'softshrink':
             self.lp = SoftShrink(C, complex=False)
-            #  thresh = lpkwargs.get('thresh', 1)
-            #  self.lp = nn.Softshrink(thresh)
         elif lp == 'hardshrink_std':
-            q = lpkwargs.get('q', 0.8)
-            self.lp = SparsifyWaveCoeffs_std(C, q, bp=False, soft=False)
+            self.lp = SparsifyWaveCoeffs_std(C, lp_q, bp=False, soft=False)
         elif lp == 'softshrink_std':
-            q = lpkwargs.get('q', 0.8)
-            self.lp = SparsifyWaveCoeffs_std(C, q, bp=False, soft=True)
+            self.lp = SparsifyWaveCoeffs_std(C, lp_q, bp=False, soft=True)
         else:
             raise ValueError("Unkown nonlinearity {}".format(lp))
 
@@ -42,26 +78,27 @@ class WaveNonLinearity(nn.Module):
                 f = nn.ReLU()
             elif b == 'relu2':
                 f = BNReLUWaveCoeffs(C, bp=True)
-            elif b == 'hardshrink':
-                f = nn.Hardshrink(thresh)
             elif b == 'softshrink':
                 f = SoftShrink(C, complex=True)
-                #  thresh = lpkwargs.get('thresh', 1)
-                #  f = nn.Softshrink(thresh)
             elif b == 'hardshrink_std':
-                q = lpkwargs.get('q', 0.8)
-                f = SparsifyWaveCoeffs_std(C, q, bp=True, soft=False)
+                f = SparsifyWaveCoeffs_std(C, bp_q, bp=True, soft=False)
             elif b == 'softshrink_std':
-                q = lpkwargs.get('q', 0.8)
-                f = SparsifyWaveCoeffs_std(C, q, bp=True, soft=True)
-            elif b == 'mag':
-                f = MagWaveCoeffs()
+                f = SparsifyWaveCoeffs_std(C, bp_q, bp=True, soft=True)
             else:
                 raise ValueError("Unkown nonlinearity {}".format(lp))
             fs.append(f)
         self.bp = nn.ModuleList(fs)
 
     def forward(self, x):
+        """ Applies the selected lowpass and bandpass nonlinearities to the
+        input x.
+
+        Args:
+            x (tuple): tuple of (lowpass, bandpasses)
+
+        Returns:
+            y (tuple): tuple of (lowpass, bandpasses)
+        """
         yl, yh = x
         yl = self.lp(yl)
         yh = [bp(y) if y.shape != torch.Size([0]) else y
@@ -70,6 +107,13 @@ class WaveNonLinearity(nn.Module):
 
 
 class BNReLUWaveCoeffs(nn.Module):
+    """ Applies batch normalization followed by a relu
+
+    Args:
+        C (int): number of channels
+        bp (bool): If true, applies bn+relu to the magnitude of the bandpass
+            coefficients. If false, is applying bn+relu to the lowpass coeffs.
+    """
     def __init__(self, C, bp=True):
         super().__init__()
         self.bp = bp
@@ -80,6 +124,7 @@ class BNReLUWaveCoeffs(nn.Module):
         self.ReLU = nn.ReLU()
 
     def forward(self, x):
+        """ Applies nonlinearity to the input x """
         if self.bp:
             s = x.shape
             # Move the orientation dimension to the channel
@@ -93,28 +138,3 @@ class BNReLUWaveCoeffs(nn.Module):
         else:
             y = self.ReLU(self.BN(x))
         return y
-
-
-class MagWaveCoeffs(nn.Module):
-    """ Returns the magnitude of complex wavelets. Still returns an imaginary
-    componenet but it is zero """
-    def __init__(self, epsilon=1e-6):
-        super().__init__()
-        self.epsilon = epsilon
-
-    def forward(self, g):
-        r = torch.sqrt(g[...,0]**2 + g[...,1]**2 + self.epsilon)
-        return torch.stack((r, torch.zeros_like(r)), dim=-1)
-
-
-class ReLUWaveCoeffs(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        """ Bandpass input comes in as a tensor of shape (N, C, 6, H, W, 2).
-        Need to do the relu independently on real and imaginary parts """
-        yl, yh = x
-        yl = func.relu(yl)
-        yh = [func.relu(b) for b in yh]
-        return yl, yh

@@ -1,0 +1,2 @@
+The DTCWT Gain Layer
+====================
