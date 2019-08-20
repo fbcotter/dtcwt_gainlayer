@@ -72,28 +72,6 @@ parser.add_argument('-q', default=1, type=float,
                     help='proportion of activations to keep')
 
 
-# Define the options of networks.
-# 'gain' = xfm + gain + inv + nonlinear
-# 'gain1' = xfm + gain + nonlinear
-# 'gain2' = gain + nonlinear
-# 'gain3' = gain + nonlinear + inv
-# 'gain4' = gain + inv + nonlinear
-#  nets = {
-    #  'ref': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainA': ['gain', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainB': ['conv', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainC': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainD': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
-    #  'gainE': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'gain', 'conv'],
-    #  'gainF': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'gain'],
-    #  'gainAB': ['gain', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainBC': ['conv', 'gain', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainCD': ['conv', 'conv', 'pool', 'gain', 'gain', 'pool', 'conv', 'conv'],
-    #  'gainDE': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'gain', 'conv'],
-    #  'gainAC': ['gain', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainBD': ['conv', 'gain', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
-    #  'gainCE': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'gain', 'conv'],
-#  }
 nets = {
     'ref': ['conv', 'pool', 'conv', 'pool', 'conv'],
     'gainA': ['gain', 'pool', 'conv', 'pool', 'conv'],
@@ -102,18 +80,6 @@ nets = {
     'gainD': ['gain', 'pool', 'gain', 'pool', 'conv'],
     'gainE': ['conv', 'pool', 'gain', 'pool', 'gain'],
     'gainF': ['gain', 'pool', 'gain', 'pool', 'gain'],
-    #  'gainB': ['conv', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainC': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainD': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
-    #  'gainE': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'gain', 'conv'],
-    #  'gainF': ['conv', 'conv', 'pool', 'conv', 'conv', 'pool', 'conv', 'gain'],
-    #  'gainAB': ['gain', 'gain', 'pool', 'conv', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainBC': ['conv', 'gain', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainCD': ['conv', 'conv', 'pool', 'gain', 'gain', 'pool', 'conv', 'conv'],
-    #  'gainDE': ['conv', 'conv', 'pool', 'conv', 'gain', 'pool', 'gain', 'conv'],
-    #  'gainAC': ['gain', 'conv', 'pool', 'gain', 'conv', 'pool', 'conv', 'conv'],
-    #  'gainBD': ['conv', 'gain', 'pool', 'conv', 'gain', 'pool', 'conv', 'conv'],
-    #  'gainCE': ['conv', 'conv', 'pool', 'gain', 'conv', 'pool', 'gain', 'conv'],
 }
 
 

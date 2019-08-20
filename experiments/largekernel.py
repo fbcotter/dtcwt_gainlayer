@@ -3,7 +3,7 @@ import argparse
 import os
 import torch
 import time
-from networks.nonlinear_nets import NonlinearNet
+from networks.largekernel_nets import GainlayerNet
 from utils import get_hms, TrainingObject
 from optim import get_optim
 from tensorboardX import SummaryWriter
@@ -86,11 +86,10 @@ if __name__ == "__main__":
         type = args.type[0]
 
     py3nvml.grab_gpus(ceil(args.num_gpus))
-    model = NonlinearNet(args.dataset, type, num_channels=args.C,
+    model = GainlayerNet(args.dataset, type, num_channels=args.C,
                          wd=args.wd, wd1=args.wd1,
                          pixel_k=args.pixel_k, lp_k=args.lp_k,
-                         bp_ks=args.bp_ks, pixel_nl=args.pixel_nl,
-                         lp_nl=args.lp_nl, bp_nl=args.bp_nl)
+                         bp_ks=args.bp_ks)
 
     # ######################################################################
     # Build the optimizer - use separate parameter groups for the gain
@@ -167,3 +166,4 @@ if __name__ == "__main__":
         trn.step_lr()
 
     save_acc(outdir, best_acc, acc)
+

@@ -4,27 +4,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as func
 from dtcwt_gainlayer import WaveConvLayer
+from dtcwt_gainlayer.layers.dwt import WaveConvLayer as WaveConvLayer_dwt
 from collections import OrderedDict
+
 
 nets = {
     'ref': ['conv', 'pool', 'conv', 'pool', 'conv'],
-    'waveA': ['gain', 'pool', 'conv', 'pool', 'conv'],
-    'waveB': ['conv', 'pool', 'gain', 'pool', 'conv'],
-    'waveC': ['conv', 'pool', 'conv', 'pool', 'gain'],
-    'waveD': ['gain', 'pool', 'gain', 'pool', 'conv'],
-    'waveE': ['conv', 'pool', 'gain', 'pool', 'gain'],
-    'waveF': ['gain', 'pool', 'gain', 'pool', 'gain'],
+    'gainA': ['gain', 'pool', 'conv', 'pool', 'conv'],
+    'gainB': ['conv', 'pool', 'gain', 'pool', 'conv'],
+    'gainC': ['conv', 'pool', 'conv', 'pool', 'gain'],
+    'gainD': ['gain', 'pool', 'gain', 'pool', 'conv'],
+    'gainE': ['conv', 'pool', 'gain', 'pool', 'gain'],
+    'gainF': ['gain', 'pool', 'gain', 'pool', 'gain'],
 }
 
 
-class PassThrough(nn.Module):
-    def forward(self, x):
-        """ No nonlinearity """
-        return x
-
-
-class NonlinearNet(nn.Module):
-    """ Builds a VGG-like network with gain layers with nonlinearities
+class GainlayerNet(nn.Module):
+    """ Builds a VGG-like network with gain layers
 
     Args:
         dataset (str): cifar10, cifar100, tiny_imagenet. Needed to know
@@ -39,12 +35,6 @@ class NonlinearNet(nn.Module):
         bp_ks (tuple(int)): bandpass convolution kernel sizes. Length of this
             tuple defines how many wavelet scales to take. If you want to skip
             the first scale, you can set bp_ks=(0,1)
-        pixel_nl (str): pixel nonlinearity. See
-            :class:`dtcwt_gainlayer.WaveNonlinearity`.
-        lp_nl (str): lowpass nonlinearity. See
-            :class:`dtcwt_gainlayer.WaveNonlinearity`.
-        pixel_nl (str): banpass nonlinearity. See
-            :class:`dtcwt_gainlayer.WaveNonlinearity`.
 
     Note:
         The wd and wd1 parameters prime the network for when you
@@ -53,8 +43,7 @@ class NonlinearNet(nn.Module):
 
     """
     def __init__(self, dataset, type, num_channels=64, wd=1e-4, wd1=None,
-                 pixel_k=5, lp_k=3, bp_ks=(1,), pixel_nl='none', lp_nl='relu',
-                 bp_nl='relu2'):
+                 pixel_k=5, lp_k=3, bp_ks=(1,), use_dwt=False):
         super().__init__()
 
         if dataset == 'cifar10':
@@ -69,17 +58,13 @@ class NonlinearNet(nn.Module):
         self._default_params = []
         layers = nets[type]
 
-        WaveLayer = lambda Cin, Cout: WaveConvLayer(
-            Cin, Cout, lp_k, bp_ks, wd=wd, wd1=wd1, lp_nl=lp_nl, bp_nl=(bp_nl,))
-
-        if pixel_nl == 'relu':
-            σ_pixel = lambda C: nn.Sequential(
-                nn.BatchNorm2d(C),
-                nn.ReLU())
+        if use_dwt:
+            WaveLayer = lambda Cin, Cout: WaveConvLayer_dwt(
+                Cin, Cout, lp_k, bp_ks)
         else:
-            σ_pixel = lambda C: nn.BatchNorm2d(C)
+            WaveLayer = lambda Cin, Cout: WaveConvLayer(
+                Cin, Cout, lp_k, bp_ks, wd=wd, wd1=wd1)
 
-        # Build the main part of the network from the dictionary definition
         blks = []
         layer, pool = 0, 1
         Cin, Cout = 3, num_channels
@@ -89,13 +74,14 @@ class NonlinearNet(nn.Module):
                 blk = nn.Sequential(
                     nn.Conv2d(Cin, Cout, pixel_k, padding=2, stride=1),
                     nn.BatchNorm2d(Cout), nn.ReLU())
-                self._default_params.extend(list(blk.parameters()))
                 Cin = Cout
                 layer += 1
             elif blk == 'gain':
-                name = 'wave' + chr(ord('A') + layer)
-                blk = nn.Sequential(WaveLayer(Cin, Cout), σ_pixel(Cout))
-                self._wave_params.extend(list(blk.parameters()))
+                name = 'gain' + chr(ord('A') + layer)
+                blk = nn.Sequential(
+                    WaveLayer(Cin, Cout),
+                    nn.BatchNorm2d(Cout),
+                    nn.ReLU())
                 Cin = Cout
                 layer += 1
             elif blk == 'pool':
@@ -110,21 +96,18 @@ class NonlinearNet(nn.Module):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(Cout, self.num_classes)
-            self._default_params.extend(list(self.fc1.parameters()))
         elif dataset == 'tiny_imagenet':
             blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
                 nn.Conv2d(Cout, 2*Cout, pixel_k, padding=2, stride=1),
                 nn.BatchNorm2d(2*Cout),
                 nn.ReLU())
-            self._default_params.extend(list(blk2[0].parameters()))
             blks = blks + [
                 ('pool3', blk1),
                 ('conv_final', blk2),]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*Cout, self.num_classes)
-            self._default_params.extend(list(self.fc1.parameters()))
 
     def parameters(self):
         """ Return all parameters that do not belong to any wavelet based
@@ -166,8 +149,7 @@ class NonlinearNet(nn.Module):
         torch.nn.utils.clip_grad_value_(grads, value)
 
     def forward(self, x):
-        """ Apply the spatial learning, the average pooling and a final fully
-        connected layer """
+        """ Define the default forward pass"""
         out = self.net(x)
         out = self.avg(out)
         out = out.view(out.size(0), -1)
