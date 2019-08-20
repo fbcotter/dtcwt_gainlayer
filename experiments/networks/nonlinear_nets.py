@@ -110,21 +110,20 @@ class NonlinearNet(nn.Module):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(Cout, self.num_classes)
-            self._default_params.extend(list(self.fc1.parameters()))
         elif dataset == 'tiny_imagenet':
             blk1 = nn.MaxPool2d(2)
             blk2 = nn.Sequential(
                 nn.Conv2d(Cout, 2*Cout, pixel_k, padding=2, stride=1),
                 nn.BatchNorm2d(2*Cout),
                 nn.ReLU())
-            self._default_params.extend(list(blk2[0].parameters()))
             blks = blks + [
                 ('pool3', blk1),
                 ('conv_final', blk2),]
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*Cout, self.num_classes)
-            self._default_params.extend(list(self.fc1.parameters()))
+            self._default_params.extend(list(blk2.parameters()))
+        self._default_params.extend(list(self.fc1.parameters()))
 
     def parameters(self):
         """ Return all parameters that do not belong to any wavelet based

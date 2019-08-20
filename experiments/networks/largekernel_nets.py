@@ -74,6 +74,7 @@ class GainlayerNet(nn.Module):
                 blk = nn.Sequential(
                     nn.Conv2d(Cin, Cout, pixel_k, padding=2, stride=1),
                     nn.BatchNorm2d(Cout), nn.ReLU())
+                self._default_params.extend(list(blk.parameters()))
                 Cin = Cout
                 layer += 1
             elif blk == 'gain':
@@ -82,6 +83,7 @@ class GainlayerNet(nn.Module):
                     WaveLayer(Cin, Cout),
                     nn.BatchNorm2d(Cout),
                     nn.ReLU())
+                self._wave_params.extend(list(blk.parameters()))
                 Cin = Cout
                 layer += 1
             elif blk == 'pool':
@@ -108,6 +110,8 @@ class GainlayerNet(nn.Module):
             self.net = nn.Sequential(OrderedDict(blks))
             self.avg = nn.AvgPool2d(8)
             self.fc1 = nn.Linear(2*Cout, self.num_classes)
+            self._default_params.extend(list(blk2.parameters()))
+        self._default_params.extend(list(self.fc1.parameters()))
 
     def parameters(self):
         """ Return all parameters that do not belong to any wavelet based
