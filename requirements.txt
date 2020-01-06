@@ -5,4 +5,4 @@ numpy
 tensorboardX
 PyWavelets
 GitPython
--e git+https://github.com/fbcotter/pytorch_wavelets.git@0.1.0#egg=pytorch_wavelets
+-e git+https://github.com/fbcotter/pytorch_wavelets.git@1.1.0#egg=pytorch_wavelets

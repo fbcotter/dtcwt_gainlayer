@@ -8,16 +8,19 @@ from pytorch_wavelets import DTCWTForward, DTCWTInverse
 from dtcwt_gainlayer.layers.nonlinear import WaveNonLinearity
 from torch.autograd import Function
 
+ORIENTATION_DIM = 2
+REAL_IMAG_DIM = -1
+
 
 class ComplexL1(Function):
     r""" Applies complex L1 regularization. Whenever the input is zero, sets the
     gradient to be 0 """
     @staticmethod
     def forward(ctx, z):
-        mag = torch.sqrt(z[...,0]**2 + z[...,1]**2)
-        phase = torch.atan2(z[...,1], z[...,0])
+        mag = torch.sqrt(z[..., 0]**2 + z[..., 1]**2)
+        phase = torch.atan2(z[..., 1], z[..., 0])
         # Mark the locations where the input was zero with nans
-        phase[(z[...,0] == 0) & (z[...,1] == 0)] = torch.tensor(np.nan)
+        phase[(z[..., 0] == 0) & (z[..., 1] == 0)] = torch.tensor(np.nan)
         ctx.save_for_backward(phase)
         return torch.sum(mag)
 
@@ -29,6 +32,28 @@ class ComplexL1(Function):
         # that they never equal each other), set the gradient to 0.
         dz[dz != dz] = 0
         return dz
+
+
+class SmoothMagFn(torch.autograd.Function):
+    """ Class to do complex magnitude """
+    @staticmethod
+    def forward(ctx, x, y, b):
+        r = torch.sqrt(x**2 + y**2 + b**2)
+        if x.requires_grad:
+            dx = x/r
+            dy = y/r
+            ctx.save_for_backward(dx, dy)
+
+        return r - b
+
+    @staticmethod
+    def backward(ctx, dr):
+        dx = None
+        if ctx.needs_input_grad[0]:
+            drdx, drdy = ctx.saved_tensors
+            dx = drdx * dr
+            dy = drdy * dr
+        return dx, dy, None
 
 
 class WaveGainLayer(nn.Module):
@@ -233,7 +258,7 @@ class WaveConvLayer(nn.Module):
     """
     def __init__(self, C, F, lp_size=3, bp_sizes=(1,), biort='near_sym_a',
                  qshift='qshift_a', xfm=True, ifm=True, wd=0, wd1=None,
-                 lp_nl=None, bp_nl=None, lp_nl_kwargs={}, bp_nl_kwargs={}):
+                 lp_nl=None, bp_nl=None, lp_nl_kwargs=None, bp_nl_kwargs=None):
         super().__init__()
         self.C = C
         self.F = F
@@ -243,25 +268,19 @@ class WaveConvLayer(nn.Module):
         self.J = len(bp_sizes)
         self.wd = wd
         self.wd1 = wd1
+        self.do_xfm = xfm
+        self.do_ifm = ifm
 
-        if xfm:
-            self.XFM = DTCWTForward(
-                biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps,
-                o_dim=2, ri_dim=-1)
-        else:
-            self.XFM = lambda x: x
-
+        self.XFM = DTCWTForward(
+            biort=biort, qshift=qshift, J=self.J, skip_hps=skip_hps,
+            o_dim=ORIENTATION_DIM, ri_dim=REAL_IMAG_DIM)
         self.GainLayer = WaveGainLayer(C, F, lp_size, bp_sizes, wd=wd, wd1=wd1)
-
         if not isinstance(bp_nl, (list, tuple)):
-            bp_nl = [bp_nl,] * self.J
+            bp_nl = [bp_nl, ] * self.J
         self.NL = WaveNonLinearity(F, lp_nl, bp_nl, lp_nl_kwargs, bp_nl_kwargs)
-
-        if ifm:
-            self.IFM = DTCWTInverse(biort=biort, qshift=qshift, o_dim=2,
-                                    ri_dim=-1)
-        else:
-            self.IFM = lambda x: x
+        self.IFM = DTCWTInverse(
+            biort=biort, qshift=qshift, o_dim=ORIENTATION_DIM,
+            ri_dim=REAL_IMAG_DIM)
 
     def forward(self, x):
         """ Applies the wavelet gain layer to the provided coefficients.
@@ -276,10 +295,15 @@ class WaveConvLayer(nn.Module):
             y: If ifm is true, y will be in the pixel domain. If false, will be
                 a tuple of (lowpass, bandpass) coefficients.
         """
-        y = self.XFM(x)
+        if self.do_xfm:
+            y = self.XFM(x)
+        else:
+            y = x
         y = self.GainLayer(y)
         y = self.NL(y)
-        y = self.IFM(y)
+        if self.do_ifm:
+            y = self.IFM(y)
+
         return y
 
     def init(self, gain=1, method='xavier_uniform'):
@@ -414,3 +438,14 @@ class WaveParamLayer(nn.Module):
                '(uj): Parameter of type {} with size: {}'.format(
                    self.u_lp.type(), 'x'.join([str(x) for x in self.u_lp.shape]),
                    self.uj.type(), 'x'.join([str(x) for x in self.uj.shape]))
+
+
+class WaveMaxPoolJ1(nn.Module):
+    """ Performs max pooling across DTCWT orientations by taking the largest
+    magnitude and adding the lowpass coefficients.
+    """
+    def forward(self, x):
+        yl, (yh, ) = x
+        r = SmoothMagFn.apply(yh[..., 0], yh[..., 1], 1e-2)
+        r = torch.max(r, dim=ORIENTATION_DIM)[0]
+        return r + torch.nn.functional.avg_pool2d(yl, 2)

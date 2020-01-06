@@ -4,6 +4,7 @@ import os
 import torch
 import time
 from networks.nonlinear_nets import NonlinearNet
+from networks.nonlinear_nets2 import NonlinearNet2 
 from utils import get_hms, TrainingObject
 from optim import get_optim
 from tensorboardX import SummaryWriter
@@ -50,6 +51,7 @@ parser.add_argument('--wd1', default=1e-5, type=float, help='l1 weight decay')
 parser.add_argument('--reg', default='l2', type=str, help='regularization term')
 parser.add_argument('--steps', default=[60,80,100], type=int, nargs='+')
 parser.add_argument('--gamma', default=0.2, type=float, help='Lr decay')
+parser.add_argument('--wpool', action='store_true', help='use nonlinear_nets2')
 
 # Network hyperparameters
 parser.add_argument('--pixel-k', default=5, type=int,
@@ -86,11 +88,18 @@ if __name__ == "__main__":
         type = args.type[0]
 
     py3nvml.grab_gpus(ceil(args.num_gpus))
-    model = NonlinearNet(args.dataset, type, num_channels=args.C,
-                         wd=args.wd, wd1=args.wd1,
-                         pixel_k=args.pixel_k, lp_k=args.lp_k,
-                         bp_ks=args.bp_ks, pixel_nl=args.pixel_nl,
-                         lp_nl=args.lp_nl, bp_nl=args.bp_nl)
+    if args.wpool:
+        model = NonlinearNet2(args.dataset, type, num_channels=args.C,
+                              wd=args.wd, wd1=args.wd1,
+                              pixel_k=args.pixel_k, lp_k=args.lp_k,
+                              bp_ks=args.bp_ks, pixel_nl=args.pixel_nl,
+                              lp_nl=args.lp_nl, bp_nl=args.bp_nl)
+    else:
+        model = NonlinearNet(args.dataset, type, num_channels=args.C,
+                             wd=args.wd, wd1=args.wd1,
+                             pixel_k=args.pixel_k, lp_k=args.lp_k,
+                             bp_ks=args.bp_ks, pixel_nl=args.pixel_nl,
+                             lp_nl=args.lp_nl, bp_nl=args.bp_nl)
 
     # ######################################################################
     # Build the optimizer - use separate parameter groups for the gain
@@ -131,6 +140,7 @@ if __name__ == "__main__":
 
     # Train for set number of epochs
     elapsed_time = 0
+    import ipdb; ipdb.set_trace()
     best_acc = 0
     trn.step_lr()
     for epoch in range(trn.last_epoch, trn.final_epoch):

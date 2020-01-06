@@ -75,7 +75,7 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128, trainsize=-1,
 
     if dataset == 'cifar10':
         trainset = torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=False,
+            root=data_dir, train=True, download=True,
             transform=transform_train)
         if trainsize > 0:
             idxs = subsample(False, trainsize)
@@ -86,7 +86,7 @@ def get_data(in_size, data_dir, dataset='cifar10', batch_size=128, trainsize=-1,
 
     elif dataset == 'cifar100':
         trainset = torchvision.datasets.CIFAR100(
-            root=data_dir, train=True, download=False,
+            root=data_dir, train=True, download=True,
             transform=transform_train)
         if trainsize > 0:
             idxs = subsample(False, trainsize)
