@@ -4,7 +4,7 @@ import os
 import torch
 import time
 from networks.nonlinear_nets import NonlinearNet
-from networks.nonlinear_nets2 import NonlinearNet2 
+from networks.nonlinear_nets2 import NonlinearNet2
 from utils import get_hms, TrainingObject
 from optim import get_optim
 from tensorboardX import SummaryWriter
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     if args.resume:
         trn._restore(os.path.join(outdir, 'model_last.pth'))
     else:
-        save_experiment_info(outdir, args.seed, args.no_comment, trn.model)
+        save_experiment_info(outdir, args.seed, args.no_comment, trn.model.net)
 
     if args.seed is not None and trn.use_cuda:
         torch.backends.cudnn.deterministic = True
@@ -140,7 +140,6 @@ if __name__ == "__main__":
 
     # Train for set number of epochs
     elapsed_time = 0
-    import ipdb; ipdb.set_trace()
     best_acc = 0
     trn.step_lr()
     for epoch in range(trn.last_epoch, trn.final_epoch):

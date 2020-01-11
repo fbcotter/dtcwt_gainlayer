@@ -12,7 +12,7 @@ nets = {
     'waveA': ['gain1', 'wpool', 'conv', 'pool', 'conv'],
     'waveB': ['conv', 'pool', 'gain1', 'wpool', 'conv'],
     'waveC': ['conv', 'pool', 'conv', 'pool', 'gain'],
-    'waveD': ['gain1', 'wpool', 'gain', 'wpool', 'conv'],
+    'waveD': ['gain1', 'wpool', 'gain1', 'wpool', 'conv'],  # This is good
     'waveE': ['conv', 'pool', 'gain1', 'wpool', 'gain'],
     'waveF': ['gain1', 'wpool', 'gain1', 'wpool', 'gain'],
 }
@@ -96,7 +96,7 @@ class NonlinearNet2(nn.Module):
                 layer += 1
             elif blk.startswith('gain'):
                 if blk.endswith('1'):
-                    blk = WaveLayer(Cin, Cout, ifm=False)
+                    blk = nn.Sequential(WaveLayer(Cin, Cout, ifm=False))
                 else:
                     blk = nn.Sequential(WaveLayer(Cin, Cout, ifm=True), σ_pixel(Cout))
                 name = 'wave' + chr(ord('A') + layer)
@@ -151,11 +151,15 @@ class NonlinearNet2(nn.Module):
         decay. We allow for more customizability.
         """
         loss = 0
-        for name, m in self.net.named_children():
+        for name, child in self.net.named_children():
             if name.startswith('wave'):
-                loss += m[0].GainLayer.get_reg()
+                for module in child.modules():
+                    try:
+                        loss += module.get_reg()
+                    except AttributeError:
+                        pass
             elif name.startswith('conv'):
-                loss += 0.5 * self.wd * torch.sum(m[0].weight**2)
+                loss += 0.5 * self.wd * torch.sum(child[0].weight**2)
         loss += 0.5 * self.wd * torch.sum(self.fc1.weight**2)
         return loss
 
