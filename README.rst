@@ -57,3 +57,4 @@ simple first test is:
 
 This runs both the LeNet and WaveLeNet architectures on cifar100 with a subset
 of the training set.
+test
